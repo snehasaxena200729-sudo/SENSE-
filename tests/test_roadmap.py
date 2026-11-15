@@ -194,7 +194,7 @@ class TestNotifier(unittest.TestCase):
 class TestAnswers(unittest.TestCase):
     def test_intents(self):
         cases = {
-            "what changed while i was away": "CHANGES",
+            "what changed while i was away": "SINCE_LEFT",   # scene change summary
             "where was my bottle before": "PREVIOUS",
             "when did you last see my phone": "WHEN",
             "who was here today": "WHO",
