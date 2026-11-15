@@ -124,8 +124,10 @@ def refresh_people():
     # Hints only help Whisper SPELL names it has been taught (not "Neha" or "snail").
     # They cannot create an identity: naming needs a verified face.
     hint_names = list(known_people) + [n.title() for n in LEGACY_PEOPLE if n.title() not in known_people]
+    # No command words here: on silence Whisper can echo this prompt back, and an
+    # echoed "forget" / "rename" was obeyed as a real command (it deleted memory).
     whisper_prompt = ", ".join(hint_names + ["water bottle", "medicine bottle", "phone",
-                                            "laptop", "rename", "forget"]) + "."
+                                            "laptop"]) + "."
 
 
 whisper_prompt = ""
