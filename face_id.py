@@ -53,9 +53,11 @@ MODELS = {
 
 MATCH_THRESHOLD = 0.363   # OpenCV's cosine threshold for SFace
 MARGIN = 0.05             # best person must beat the next best by this much
-MIN_FACE_SCORE = 0.90
+MIN_FACE_SCORE = 0.85    # measured: clear frontal faces score 0.90-0.95
 MIN_EYE_PX = 28           # smaller faces carry too little detail to identify
-MAX_YAW_RATIO = 0.25      # nose offset from the eye midpoint / eye distance
+MAX_YAW_RATIO = 0.40      # nose offset from the eye midpoint / eye distance.
+                          # 0.25 rejected ordinary faces turned slightly (0.28, 0.29);
+                          # SFace aligns the face itself, the identity rule stays strict
 
 
 def _sha256(path):
@@ -139,16 +141,35 @@ class FaceID:
     @classmethod
     def create(cls, download=True):
         """Returns a FaceID, or None (and says why) if it cannot run."""
-        if cv2 is None or not hasattr(cv2, "FaceDetectorYN"):
-            print("🙂 Face recognition off: OpenCV is too old (needs 4.5.4+).")
+        reason = cls.unavailable_reason()
+        if reason:
+            print(f"🙂 Face recognition off: {reason}")
+            cls.last_error = reason
             return None
         try:
             if not ensure_models(download):
                 return None
             return cls(model_paths())
         except Exception as e:  # noqa: BLE001  (no internet on first run, etc.)
+            cls.last_error = "the face models could not be downloaded or loaded."
             print(f"🙂 Face recognition off ({e}). Connect to the internet once to download the face models.")
             return None
+
+    last_error = None
+
+    @staticmethod
+    def unavailable_reason():
+        """Why face recognition cannot run with this OpenCV (None if it can).
+        The YuNet 2023 model needs OpenCV 4.8 or newer."""
+        if cv2 is None:
+            return "OpenCV is not installed."
+        try:
+            major, minor = (int(x) for x in cv2.__version__.split(".")[:2])
+        except ValueError:
+            return None
+        if (major, minor) < (4, 8) or not hasattr(cv2, "FaceDetectorYN"):
+            return (f"OpenCV {cv2.__version__} is too old. Run: pip install -U \"opencv-python>=4.8\"")
+        return None
 
     @classmethod
     def load_if_available(cls):
@@ -207,10 +228,15 @@ class FaceID:
 
 class Enrolment:
     """'This is Sneha': collect several good face samples over a few seconds,
-    without blocking the main loop (the voice path must stay fast)."""
+    without blocking the main loop (the voice path must stay fast).
+
+    It follows the person showing the BIGGEST clear face, whatever ByteTrack
+    calls them: an earlier version followed one track id, and lost the person
+    whenever ByteTrack renumbered them. consistent() still rejects the samples
+    if they come from two different people."""
     SAMPLES = 5
     MIN_SAMPLES = 3
-    TIMEOUT_S = 4.0
+    TIMEOUT_S = 6.0
 
     def __init__(self, name, track_id, now):
         self.name, self.track_id, self.started = name, track_id, now

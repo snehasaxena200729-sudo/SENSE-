@@ -88,8 +88,11 @@ def refresh_people():
     if face_ident is not None:
         face_ident.set_profiles(memory_db.load_face_profiles())
         known_people.update(face_ident.since)
-    whisper_prompt = ", ".join(list(known_people) + ["water bottle", "medicine bottle", "phone",
-                                                     "laptop", "rename", "forget"]) + "."
+    # Hints only help Whisper SPELL names it has been taught (not "Neha" or "snail").
+    # They cannot create an identity: naming needs a verified face.
+    hint_names = list(known_people) + [n.title() for n in LEGACY_PEOPLE if n.title() not in known_people]
+    whisper_prompt = ", ".join(hint_names + ["water bottle", "medicine bottle", "phone",
+                                            "laptop", "rename", "forget"]) + "."
 
 
 whisper_prompt = ""
@@ -318,7 +321,8 @@ def learn_person(name):
     the shirt colour, which matched other people."""
     global enrolment
     if face_ident is None:
-        speak("Face recognition is not available, so I won't name people. I will call everyone a person.")
+        speak("Face recognition is off, so I won't name people. "
+              + (f"The reason: {FaceID.last_error}" if FaceID.last_error else ""))
         return
     if not active_people_crops:
         speak("I don't see anyone clearly in front of the camera.")
@@ -359,6 +363,7 @@ def finish_enrolment(now):
         return
     memory_db.save_face_embeddings(e.name, e.samples, created_at=now)
     refresh_people()
+    person_gate.reset_track(e.track_id)   # old "unknown" checks must not count against the new name
     print(f"✨ Enrolled {e.name} by face ({len(e.samples)} samples).")
     speak(f"Got it. I will recognise {e.name} by face.")
 
@@ -432,7 +437,9 @@ def answer_voice_query(user_text):
             speak("I didn't catch the name.")
             return
 
-        is_object_name = any(item in extracted for item in list(ALLOWED_ITEMS.values())) or ("my " in extracted and not extracted.startswith("my name"))
+        # whole words only: "Catherine" contains "cat" but is a person's name
+        words = extracted.split()
+        is_object_name = any(item in words for item in ALLOWED_ITEMS.values()) or (words[:1] == ["my"] and words[1:2] != ["name"])
         
         if is_object_name:
             learn_custom_object(extracted)
@@ -519,8 +526,8 @@ def answer_voice_query(user_text):
     # Audit fix 1: never answer where a named person is from unverified sightings
     who = asked_about_unverifiable_person(user_text)
     if who:
-        speak(f"I can't recognise faces yet, so I can't tell you where {who.capitalize()} is. "
-              f"I can only say whether a person is here.")
+        speak(f"I only knew {who.capitalize()} by clothing colour, which is not reliable, so I won't guess. "
+              f"Please introduce {who.capitalize()} to me again by face.")
         return
 
     # Intents WHERE / WHEN / PREVIOUS need a target item or person
@@ -671,8 +678,9 @@ def answer_who(current_time):
     lt = time.localtime(current_time)
     midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
     if not known_people:
-        speak("I can't recognise faces yet, so I can't tell you who was here. "
-              "I only know when a person is in view.")
+        speak("Nobody has been introduced to me by face yet, so I can't tell you who was here."
+              if face_ident is not None else
+              "Face recognition is off, so I can't tell you who was here.")
         return
     people = {p.lower(): p for p in known_people}
     since = {p.lower(): t for p, t in known_people.items()}
@@ -909,7 +917,14 @@ def process_voice_queue():
 # Startup Greeting
 saved_items = memory_db.get_all_remembered_items()
 print(f"💾 Restored {len(saved_items)} objects and {len(known_people)} people.")
-speak(f"Sense Master Online. Restored {len(saved_items)} objects and {len(known_people)} people.")
+startup = f"Sense Master Online. Restored {len(saved_items)} objects and {len(known_people)} people."
+if face_ident is None:
+    startup += " Face recognition is off, so I will not name people."
+elif unverifiable_people():
+    n = len(unverifiable_people())
+    startup += (f" {n} {'person was' if n == 1 else 'people were'} taught with the old clothing method. "
+                f"Please introduce them again by face.")
+speak(startup)
 
 # =====================================================================
 # 5. MAIN REAL-TIME MULTIMODAL LOOP
@@ -1002,6 +1017,7 @@ while True:
     active_people_crops.clear()
     active_object_crops.clear()
     frame_observations = {}   # name -> this frame's stable observation (Roadmap E2)
+    enrol_candidates = []     # (eye px, track id, face embedding) while enrolling
 
     if boxes is not None and boxes.id is not None:
         for box in boxes:
@@ -1090,13 +1106,13 @@ while True:
                 # Audit fix 1 + 4: detection + tracking say "a person is here", never
                 # who. A name appears only after face checks pass the identity gate.
                 person_gate.touch(tid, current_time)
-                enrolling = enrolment is not None and enrolment.track_id == tid
+                enrolling = enrolment is not None
                 if face_ident is not None and should_run_yolo and (enrolling or frame_count % FACE_EVERY_N == 0):
                     result, eye_px, emb = face_ident.check(raw_frame, (x1, y1, x2, y2))
                     if not enrolling:
                         person_gate.observe(tid, result)
                     elif emb is not None:
-                        enrolment.add(emb)
+                        enrol_candidates.append((eye_px or 0.0, tid, emb))
                     if eye_px:
                         face_eye_px[tid] = (current_time, eye_px)
                 verified = person_gate.label(tid)
@@ -1242,6 +1258,11 @@ while True:
     person_gate.prune(current_time)
     for old_tid in [t for t, (ts, _) in face_eye_px.items() if current_time - ts > 3]:
         del face_eye_px[old_tid]
+    if enrolment is not None and enrol_candidates:
+        # the biggest clear face this frame, whatever its track id (see Enrolment)
+        _, enrol_tid, enrol_emb = max(enrol_candidates, key=lambda c: c[0])
+        enrolment.add(enrol_emb)
+        enrolment.track_id = enrol_tid
     if enrolment is not None and enrolment.finished(current_time):
         finish_enrolment(current_time)
     for old_tid in [t for t, d in live_people.items() if current_time - d["last_seen"] > 5]:
