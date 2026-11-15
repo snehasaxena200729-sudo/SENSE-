@@ -13,6 +13,7 @@ import speech_recognition as sr
 from ultralytics import YOLO
 import memory_db
 import spatial
+import distance
 import answers
 from identity import EntityResolver
 from events import EventTracker
@@ -83,7 +84,6 @@ resolver = EntityResolver(memory_db.load_entities())     # E1 stable identities
 event_tracker = EventTracker()                           # E2 debounced events
 last_db_write = {}                                       # E2 throttle: name -> time
 DB_WRITE_INTERVAL_S = 1.0
-hazard_history = defaultdict(list)                       # O1: tid -> [(time, box height)]
 last_changes_query = None                                # E6 "what changed" bookmark
 looming = LoomingDetector()                              # sudden obstacles, any object
 approach = ApproachTracker()                             # fast-growing YOLO boxes, any class
@@ -99,6 +99,15 @@ DEFAULT_MIN_CONFIDENCE = 0.50
 CONF_SMOOTHING = 0.3            # EMA weight of the newest frame
 MIN_FRAMES_TO_CONFIRM = 4       # was 2
 MIN_CLASS_SHARE = 0.6           # winning class must have 60% of the votes
+# Audit fix 2: focal length in pixels. Measured once with tools/validate_distance.py
+# (stored as f / frame width); until then it is derived from the assumed field of view.
+try:
+    FOCAL_RATIO = float(memory_db.get_setting("focal_ratio", "0")) or None
+except ValueError:
+    FOCAL_RATIO = None
+FOCAL_UNC = distance.CALIBRATED_FOCAL_UNCERTAINTY if FOCAL_RATIO else distance.FOCAL_UNCERTAINTY
+print("📏 Distance: " + ("calibrated focal length." if FOCAL_RATIO else
+      "NOT calibrated (assumed 65 degree view). Run tools/validate_distance.py to calibrate."))
 try:
     speech_rate = int(memory_db.get_setting("speech_rate", "190"))   # O2 preference
 except ValueError:
@@ -147,17 +156,7 @@ HAZARD_ITEMS = {
 ALLOWED_ITEMS.update(HAZARD_ITEMS)
 HAZARD_NAMES = set(HAZARD_ITEMS.values())
 
-OBJECT_REAL_SIZES_CM = {
-    "chair": 90.0, "couch": 85.0, "bed": 60.0, "table": 75.0, "plant": 50.0,
-    "tv": 60.0, "dog": 50.0, "cat": 30.0, "suitcase": 60.0, "bench": 80.0, "bicycle": 100.0,
-    "phone": 15.0,
-    "remote": 18.0,
-    "bottle": 23.0,
-    "cup": 10.0,
-    "laptop": 26.0,
-    "book": 23.0,
-    "mouse": 11.0
-}
+# Object sizes for distance estimates now live in distance.py (audit fix 2).
 
 # =====================================================================
 # 2. AUDIO & 360-DEGREE SPATIAL COMPASS HELPERS
@@ -204,14 +203,6 @@ def calculate_world_relative_direction(original_zone, camera_heading_degrees):
         return "on your left"
     else:
         return "in front of you"
-
-def format_distance(distance_feet):
-    if distance_feet < 2.2:
-        return "within arm's reach"
-    elif distance_feet < 5.5:
-        return f"about {round(distance_feet)} feet away"
-    else:
-        return f"further away, about {round(distance_feet)} feet"
 
 def format_time_ago(seconds):
     seconds = int(seconds)
@@ -756,31 +747,6 @@ def handle_event(ev):
         notifier.push(P2 if is_personal else P3, lower, text)
 
 
-def check_hazard(tid, display_name, category, box_h, dist_feet, center_x, frame_width, now):
-    """Roadmap O1: warn when an obstacle or person is ahead AND getting closer.
-
-    'Getting closer' = the box grew by more than 15% within about half a second
-    (looming). Requiring growth avoids nagging about furniture that simply
-    sits near a stationary camera.
-    """
-    hist = hazard_history[tid]
-    hist.append((now, box_h))
-    while hist and now - hist[0][0] > 1.0:
-        hist.pop(0)
-    old = [h for t, h in hist if now - t >= 0.4]
-    if not old:
-        return
-    growth = box_h / max(1.0, old[-1])
-    ahead = abs(spatial.pixel_to_angle(center_x, frame_width)) < 15
-    if ahead and dist_feet < 5.0 and growth > 1.15:
-        if category == "person":
-            who = display_name if display_name not in ("Unfamiliar Person", "Person") else "someone"
-            text = f"Careful, {who} is coming towards you, {format_distance(dist_feet)}"
-        else:
-            text = f"Careful, {category} ahead, {format_distance(dist_feet)}"
-        notifier.push(P1, f"hazard:{tid}", text)
-
-
 # Whisper hint words. Names are only included for people SENSE can verify, so the
 # transcriber is not nudged into hearing a name that was never said.
 whisper_prompt = ", ".join(list(known_people) + ["water bottle", "medicine bottle", "phone", "laptop", "rename", "forget"]) + "."
@@ -876,6 +842,7 @@ while True:
 
     current_time = time.time()
     frame_height, frame_width, _ = frame.shape
+    f_px = distance.focal_px(frame_width, focal_ratio=FOCAL_RATIO)
     frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     frame_count += 1
 
@@ -1036,9 +1003,9 @@ while True:
 
                        # --- BRANCH 1: PERSON RE-ID ---
             if winner_name == "person":
-                aspect_ratio = h_px / max(1, w_px)
-                real_size = 165.0 if aspect_ratio > 2.0 else 75.0
-                dist_feet = (real_size * 600.0) / (h_px * 30.48)
+                # Audit fix 2: geometry with cut-off detection and an error range
+                est = distance.person_distance((x1, y1, x2, y2), frame_width, frame_height,
+                                               f_px, focal_unc=FOCAL_UNC)
                 
                 # Audit fix 1: detection + tracking say "a person is here", never who.
                 # A name appears only once the identity gate has verified it.
@@ -1058,9 +1025,8 @@ while True:
 
             # --- BRANCH 2: DUAL-TIER OBJECT RE-ID ---
             else:
-                real_size = OBJECT_REAL_SIZES_CM.get(winner_name, 18.0)
-                measuring_dim = max(w_px, h_px)
-                dist_feet = (real_size * 600.0) / (measuring_dim * 30.48)
+                est = distance.object_distance(winner_name, (x1, y1, x2, y2), frame_width,
+                                               frame_height, f_px, focal_unc=FOCAL_UNC)
 
                 if crop.size > 0:
                     active_object_crops[tid] = {
@@ -1097,7 +1063,8 @@ while True:
                         display_name = resolver.display_label(eid, winner_name) if eid else winner_name.capitalize()
                         entity_settled = eid is not None and resolver.name_of(eid) is not None
 
-            dist_phrase = format_distance(dist_feet)
+            dist_feet = distance.feet_or_none(est)     # None when unknown
+            dist_phrase = distance.phrase(est)         # a range or a band, never false precision
 
             # Update Live Memory (Roadmap E4: every observation gets a WORLD angle)
             if camera_is_stable and display_name == "Person":
@@ -1179,8 +1146,6 @@ while True:
     person_gate.prune(current_time)
     for old_tid in [t for t, d in live_people.items() if current_time - d["last_seen"] > 5]:
         del live_people[old_tid]
-    for old_tid in [t for t, hist in hazard_history.items() if not hist or current_time - hist[-1][0] > 5]:
-        del hazard_history[old_tid]
 
     # Roadmap E3: speak at most one (merged) announcement, only if it matters
     notifier.tick(camera_moving=is_camera_moving, hold=is_listening)

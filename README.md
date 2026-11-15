@@ -60,6 +60,7 @@ SENSE also speaks **on its own**:
 | `spatial.py` | **World-anchored directions** (stored angle + heading), turn instructions, nearby-object relations |
 | `answers.py` | **Intents, fuzzy name matching, confidence scoring** (confirmed / likely / uncertain) and wording |
 | `hazards.py` | **Sudden-obstacle warnings:** time-to-contact from optical-flow divergence (any textured object) and box-growth checks for every YOLO class |
+| `distance.py` | **Monocular distance with error ranges.** Focal length from resolution (or calibration), cut-off box detection, coarse spoken bands |
 | `people.py` | **Person naming gate.** Detection (YOLO) and tracking (ByteTrack) never say who someone is; a name is spoken only after a verified identity check agrees 3 of the last 5 times |
 | `memory_db.py` | SQLite tables: `environmental_memory` (latest state), `events` (history), `entities`, people and personal-item profiles, `settings` |
 | `tests/` | Unit tests: `python -m unittest discover -s tests -v` |
@@ -79,6 +80,11 @@ internally (PyTorch, OpenCV, PortAudio) are not managed by the app.
 
 ## Known limitations
 
+- **Distances are coarse on purpose.** One camera cannot measure depth; SENSE infers it from an
+  assumed size (eye spacing, body height, typical object size), so it speaks a range such as
+  "about 4 to 6 feet away", "within arm's reach", "closer than about 7 feet" (when you are cut
+  off by the frame edge) or "distance unclear". Calibrate your camera once and check the error
+  with a tape measure: `python tools/validate_distance.py --live --person-height 1.70 --save`.
 - **People are "a person" unless verified.** Earlier versions named people from the colour of
   their clothes, which matched different people (8 of 15 pairs in a test). That is removed.
 
