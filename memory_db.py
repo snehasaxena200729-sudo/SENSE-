@@ -383,7 +383,8 @@ def forget(name):
     removed += conn.execute("DELETE FROM custom_object_profiles WHERE LOWER(name) = ?", (n,)).rowcount
     removed += conn.execute("DELETE FROM environmental_memory WHERE object_name = ?", (n,)).rowcount
     removed += conn.execute("DELETE FROM entities WHERE LOWER(name) = ?", (n,)).rowcount
-    removed += conn.execute("DELETE FROM events WHERE name = ?", (n,)).rowcount
+    # LOWER(): rows renamed by older versions were stored in Title Case ("My Medicine")
+    removed += conn.execute("DELETE FROM events WHERE LOWER(name) = ?", (n,)).rowcount
     conn.commit()
     return removed
 
@@ -404,7 +405,8 @@ def rename(old, new):
         changed += conn.execute("UPDATE custom_object_profiles SET name = ? WHERE LOWER(name) = ?", (n, o)).rowcount
         changed += conn.execute("UPDATE environmental_memory SET object_name = ? WHERE LOWER(object_name) = ?", (n, o)).rowcount
         changed += conn.execute("UPDATE entities SET name = ? WHERE LOWER(name) = ?", (n, o)).rowcount
-        changed += conn.execute("UPDATE events SET name = ? WHERE LOWER(name) = ?", (new.title(), o)).rowcount
+        # events are stored lower-case (log_event); Title Case here made "forget" miss them
+        changed += conn.execute("UPDATE events SET name = ? WHERE LOWER(name) = ?", (n, o)).rowcount
         conn.execute("DELETE FROM people_profiles WHERE LOWER(name) = ? AND LOWER(name) != ?", (n, o))
         changed += conn.execute("UPDATE people_profiles SET name = ? WHERE LOWER(name) = ?", (new.title(), o)).rowcount
         conn.execute("DELETE FROM face_profiles WHERE LOWER(name) = ? AND LOWER(name) != ?", (n, o))
