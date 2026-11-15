@@ -100,11 +100,12 @@ class TestEvents(unittest.TestCase):
     def test_gone_vs_out_of_view(self):
         et = EventTracker()
         et.update({"Cup": self.obs(0), "Book": self.obs(0)}, 0.0, True, 0)
-        ev = et.update({}, 4.0, True, heading=0)      # still facing the spot
+        et.update({"Cup": self.obs(0), "Book": self.obs(0)}, 4.0, True, 0)
+        ev = et.update({}, 4.0 + EventTracker.GONE_AFTER_S + 0.5, True, heading=0)  # still facing the spot
         self.assertEqual({e["type"] for e in ev}, {"GONE"})
         et2 = EventTracker()
         et2.update({"Cup": self.obs(0)}, 0.0, True, 0)
-        ev2 = et2.update({}, 4.0, True, heading=120)  # user turned away
+        ev2 = et2.update({}, EventTracker.GONE_AFTER_S + 1, True, heading=120)  # user turned away
         self.assertEqual(ev2[0]["type"], "OUT_OF_VIEW")
 
     def test_moved_needs_votes_and_ignores_head_turns(self):
@@ -123,10 +124,25 @@ class TestEvents(unittest.TestCase):
     def test_returned_after_gone(self):
         et = EventTracker()
         et.update({"Cup": self.obs(0)}, 0, True, 0)
-        et.update({}, 4, True, 0)
-        ev = et.update({"Cup": self.obs(25)}, 10, True, 0)
+        et.update({}, EventTracker.GONE_AFTER_S + 1, True, 0)
+        ev = et.update({"Cup": self.obs(25)}, EventTracker.GONE_AFTER_S + 5, True, 0)
         self.assertEqual(ev[0]["type"], "RETURNED")
         self.assertIn("from_zone", ev[0])
+
+
+    def test_brief_sighting_is_flagged(self):
+        """A 'phone' seen for one second (likely a false detection) must not be announced."""
+        et = EventTracker()
+        et.update({"Phone": self.obs(0)}, 0, True, 0)
+        et.update({"Phone": self.obs(0)}, 1, True, 0)
+        ev = et.update({}, 1 + EventTracker.GONE_AFTER_S + 0.1, True, 0)
+        self.assertEqual(ev[0]["type"], "GONE")
+        self.assertTrue(ev[0].get("brief"))
+        # a long, steady sighting is a real disappearance
+        et.update({"Cup": self.obs(0)}, 20, True, 0)
+        et.update({"Cup": self.obs(0)}, 30, True, 0)
+        ev = et.update({}, 30 + EventTracker.GONE_AFTER_S + 0.1, True, 0)
+        self.assertFalse(ev[0].get("brief"))
 
 
 class TestNotifier(unittest.TestCase):
@@ -159,6 +175,14 @@ class TestNotifier(unittest.TestCase):
         self.n.push(P2, "c", "C moved")
         self.t[0] = 120     # waited 20 s > MAX_WAIT_S
         self.assertIsNone(self.n.tick())
+
+    def test_hold_while_listening_only_p1(self):
+        self.n.push(P2, "cup", "Cup moved")
+        self.assertIsNone(self.n.tick(hold=True))
+        self.n.push(P1, "obstacle", "Stop")
+        self.assertEqual(self.n.tick(hold=True), "Stop.")
+        self.t[0] = Notifier.MIN_GAP_S + 1
+        self.assertEqual(self.n.tick(), "Cup moved.")
 
     def test_quiet_mode(self):
         self.n.set_level("quiet")
@@ -205,6 +229,60 @@ class TestAnswers(unittest.TestCase):
         self.assertEqual(answers.summarise_changes([]), "Nothing has changed that I noticed.")
 
 
+class TestRename(unittest.TestCase):
+    def test_parse_and_intent(self):
+        for text in ["rename my bottle to medicine", "change my bottle to medicine",
+                     "change the name of my bottle to my medicine",
+                     "call my bottle my medicine instead"]:
+            self.assertEqual(answers.classify_intent(text), "RENAME", text)
+            self.assertEqual(answers.parse_rename(text), ("my bottle", "my medicine"), text)
+        self.assertEqual(answers.classify_intent("what changed"), "CHANGES")
+        self.assertEqual(answers.classify_intent("this is my medicine bottle"), "LEARN")
+        # extra words around the old name are fixed later by fuzzy matching
+        old, new = answers.parse_rename("change input of my bottle to medicine")
+        self.assertEqual(answers.fuzzy_find(old, ["my bottle", "white cup"]), "my bottle")
+
+
+class TestHazards(unittest.TestCase):
+    def setUp(self):
+        import hazards
+        if hazards.cv2 is None:
+            self.skipTest("OpenCV not installed")
+        self.hazards = hazards
+        rng = np.random.default_rng(0)
+        tex = (rng.random((60, 80)) * 255).astype(np.uint8)
+        import cv2
+        self.cv2 = cv2
+        self.base = cv2.resize(tex, (1280, 960), interpolation=cv2.INTER_CUBIC)
+
+    def frame(self, scale=1.0, shift=0):
+        cv2 = self.cv2
+        h, w = 480, 640
+        m = np.float32([[scale, 0, w / 2 - scale * 640 + shift], [0, scale, h / 2 - scale * 480]])
+        return cv2.warpAffine(self.base, m, (w, h), borderMode=cv2.BORDER_REFLECT)
+
+    def run_seq(self, scales, shifts):
+        d = self.hazards.LoomingDetector()
+        alerts = [d.update(self.frame(s, x), 1 / 15.0) for s, x in zip(scales, shifts)]
+        return [a for a in alerts if a is not None]
+
+    def test_fast_approach_alerts(self):
+        # 8% bigger per frame at 15 fps = contact in ~0.8 s (true TTC = 1/0.08 frames)
+        self.assertTrue(self.run_seq([1.08 ** i for i in range(10)], [0] * 10))
+
+    def test_still_and_panning_do_not_alert(self):
+        self.assertFalse(self.run_seq([1.0] * 10, [0] * 10))
+        self.assertFalse(self.run_seq([1.0] * 10, [3 * i for i in range(10)]))
+
+    def test_box_growth(self):
+        t = self.hazards.ApproachTracker()
+        self.assertFalse(t.update(1, 0.0, 120, 480, 0))
+        self.assertTrue(t.update(1, 0.4, 180, 480, 0))      # 25% -> 37% of the view
+        t2 = self.hazards.ApproachTracker()
+        t2.update(2, 0.0, 120, 480, 40)
+        self.assertFalse(t2.update(2, 0.4, 180, 480, 40))   # off to the side
+
+
 class TestMemoryDB(unittest.TestCase):
     def setUp(self):
         import memory_db
@@ -232,6 +310,16 @@ class TestMemoryDB(unittest.TestCase):
         self.assertEqual(self.db.get_item_history("bottle")[0]["detail"], "from on your right")
         self.assertEqual(len(self.db.get_events_since(0)), 1)
         self.assertGreater(self.db.forget("my bottle"), 0)
+        self.assertIsNone(self.db.find_latest_memory("bottle"))
+
+    def test_rename_keeps_profile_and_history(self):
+        self.db.save_custom_object_profile("my bottle", "bottle", sig_for(1))
+        self.db.save_object_observation("my bottle", "on your left", 1, 1, seen_at=10)
+        self.db.log_event(10, "My Bottle", "MOVED", "on your left")
+        self.assertGreater(self.db.rename("my bottle", "my medicine"), 0)
+        self.assertIn("my medicine", self.db.load_all_custom_object_profiles())
+        self.assertEqual(self.db.find_latest_memory("medicine")["name"], "my medicine")
+        self.assertEqual(len(self.db.get_item_history("medicine")), 1)
         self.assertIsNone(self.db.find_latest_memory("bottle"))
 
     def test_entities_roundtrip_and_settings(self):

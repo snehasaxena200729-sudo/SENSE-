@@ -30,7 +30,7 @@ LEVELS = {"quiet": P1, "normal": P2, "verbose": P3}
 
 
 class Notifier:
-    PER_ITEM_COOLDOWN_S = 30.0
+    PER_ITEM_COOLDOWN_S = 60.0
     MIN_GAP_S = 4.0
     MAX_WAIT_S = 10.0
     P1_COOLDOWN_S = 6.0
@@ -62,8 +62,11 @@ class Notifier:
         heapq.heappush(self.pending, (priority, next(self._order), now, key, text))
         return True
 
-    def tick(self, camera_moving=False):
-        """Call once per frame. Returns the sentence spoken, or None."""
+    def tick(self, camera_moving=False, hold=False):
+        """Call once per frame. Returns the sentence spoken, or None.
+
+        hold=True while the microphone is open: only P1 (safety) may speak,
+        everything else waits, so SENSE never talks into its own recording."""
         now = self.clock()
         self.pending = [p for p in self.pending if now - p[2] <= self.MAX_WAIT_S]
         heapq.heapify(self.pending)
@@ -71,7 +74,7 @@ class Notifier:
             return None
         top_priority = self.pending[0][0]
         if top_priority != P1:
-            if camera_moving or self.is_busy_fn() or now - self.last_spoken_at < self.MIN_GAP_S:
+            if hold or camera_moving or self.is_busy_fn() or now - self.last_spoken_at < self.MIN_GAP_S:
                 return None
         batch = [heapq.heappop(self.pending)]
         if self.pending and self.pending[0][0] == top_priority and top_priority != P1:

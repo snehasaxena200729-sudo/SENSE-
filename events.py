@@ -34,7 +34,8 @@ VISIBLE, GONE, OUT_OF_VIEW = "VISIBLE", "GONE", "OUT_OF_VIEW"
 
 
 class EventTracker:
-    GONE_AFTER_S = 3.0
+    GONE_AFTER_S = 8.0          # field test: 3 s was too eager (YOLO often misses a few s)
+    MIN_VISIBLE_S = 3.0         # sightings shorter than this are 'brief' (likely flicker)
     ZONE_WINDOW = 5
     ZONE_VOTES_NEEDED = 4
     MOVE_THRESHOLD_DEG = 12.0   # about one third of the camera's view
@@ -57,7 +58,7 @@ class EventTracker:
                 self.items[name] = {
                     "state": VISIBLE, "zone": obs["zone"], "obs": obs,
                     "last_seen": now, "votes": deque(maxlen=self.ZONE_WINDOW),
-                    "anchor": obs,
+                    "anchor": obs, "visible_since": now,
                 }
                 events.append(self._event("APPEARED", name, obs, now))
                 continue
@@ -67,7 +68,7 @@ class EventTracker:
                 if st["state"] == GONE and self._moved(st["obs"], obs):
                     ev["from_zone"] = st["zone"]
                 events.append(ev)
-                st.update(state=VISIBLE, zone=obs["zone"], anchor=obs)
+                st.update(state=VISIBLE, zone=obs["zone"], anchor=obs, visible_since=now)
                 st["votes"].clear()
             else:
                 st["votes"].append(self._moved(st["anchor"], obs))
@@ -91,7 +92,11 @@ class EventTracker:
             angle = st["obs"].get("world_angle")
             in_view = angle is None or spatial.is_in_view(angle, heading)
             st["state"] = GONE if in_view else OUT_OF_VIEW
-            events.append(self._event(st["state"], name, st["obs"], st["last_seen"]))
+            ev = self._event(st["state"], name, st["obs"], st["last_seen"])
+            # seen only for a moment (often a false detection): record it, don't announce it
+            if st["last_seen"] - st.get("visible_since", st["last_seen"]) < self.MIN_VISIBLE_S:
+                ev["brief"] = True
+            events.append(ev)
         return events
 
     def _moved(self, old, new):

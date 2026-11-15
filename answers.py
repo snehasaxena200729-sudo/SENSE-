@@ -27,6 +27,7 @@ import math
 # ----------------------------------------------------------------------
 INTENT_PATTERNS = [
     ("FORGET",   ["forget"]),
+    ("RENAME",   ["rename", "change the name", "change name", "change my", "call my"]),
     ("LEARN",    ["this is", "my name is", "remember as", "call this", "call it"]),
     ("QUIET",    ["be quiet", "quiet mode", "stop talking", "silent mode", "fewer alerts"]),
     ("VERBOSE",  ["talk more", "verbose", "tell me everything", "more alerts"]),
@@ -46,10 +47,51 @@ INTENT_PATTERNS = [
 
 def classify_intent(text):
     t = text.lower()
+    # "change <something> to <something>" is a rename, never a 'what changed' question
+    if t.lstrip().startswith("change ") and " to " in t:
+        return "RENAME"
     for intent, phrases in INTENT_PATTERNS:
         if any(p in t for p in phrases):
             return intent
     return "WHERE"
+
+
+def parse_rename(text):
+    """'rename my bottle to my medicine' -> ('my bottle', 'my medicine').
+
+    Also: 'change my bottle to medicine', 'change the name of my bottle to medicine',
+    'call my bottle my medicine instead'. Returns (old_words, new_words) or None.
+    The old part is fuzzy-matched by the caller against names actually in memory.
+    """
+    t = text.lower().strip(" .,!?")
+    t = t.replace(" instead", "")
+    for trigger in ("change the name of", "change name of", "change the name", "change name",
+                    "rename", "change", "call"):
+        if trigger in t:
+            t = t.split(trigger, 1)[1].strip()
+            break
+    else:
+        return None
+    for sep in (" to be ", " to ", " into ", " as "):
+        if sep in t:
+            old, new = t.rsplit(sep, 1)
+            break
+    else:
+        # 'call my bottle my medicine' -> split before the second 'my'
+        idx = t.find(" my ", 1)
+        if idx < 0:
+            return None
+        old, new = t[:idx], t[idx + 1:]
+    old = old.replace("of ", "", 1).strip() if old.startswith("of ") else old.strip()
+    new = new.strip()
+    for prefix in ("the name ", "name "):
+        if new.startswith(prefix):
+            new = new[len(prefix):]
+    if not old or not new:
+        return None
+    if old.startswith("my ") and not new.startswith("my "):
+        new = "my " + new
+    return old, new
 
 
 STOP_WORDS = {"where", "is", "my", "the", "a", "an", "was", "did", "you", "last", "see",
