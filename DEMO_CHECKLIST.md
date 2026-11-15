@@ -56,6 +56,9 @@ print('heard:', r.recognize_whisper(a, model='tiny'))"
   - `🙂 Face recognition on. People enrolled by face: ...`
   - `📖 Text reading ready (Tesseract: ...)`
 - [ ] You hear: **"Sense Master Online. Restored N objects and M people."**
+  If it adds "... taught with the old clothing method", those names can't be recognised. Before the
+  demo say **"Forget Sneha"** (for each such name; this also deletes a face profile of that name)
+  and teach Sneha again in step B.
 - [ ] Click once on the **video window**. Keys (space, R, q) only work while that window is in front.
 - [ ] Reset the settings a previous run may have saved: press space, say **"Normal mode"**
   → "Normal mode. I will tell you about your items and people you know."
