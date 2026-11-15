@@ -67,6 +67,32 @@ slow indoor pace. Have a helper watch the path. **These alerts are an aid, never
 For each approach, note at what real distance the alert came (a helper with a tape measure, or floor
 tape marks every 0.5 m).
 
+## 4b. "Find my bottle" guidance
+
+You need a bottle (or cup, phone, chair), a table and about 3 m of clear floor. Hold the camera at
+chest height, as in section 4. A helper watches the path. Keep the terminal visible: every
+guidance sentence is also printed as `🧭 Guide: …`, and the window shows `FINDING: …`.
+
+| Step | Expected |
+| --- | --- |
+| G1 Bottle on a table about 2.5 m away, **in view**, a little to the left of centre. Hold still 3 s. Press space, say "Find my bottle" | Within about 3 s: "Found the bottle, a little to your left, …" (or "your bottle" if you taught it). Terminal: `🧭 Intent: FIND`, `🔎 Find mode: …` |
+| G2 Turn slowly left | "Straight ahead, …" once it is centred. **Not** a cue every second: at least 1.5 s between cues, and the same cue repeats at most every 4 s |
+| G3 Walk slowly towards it, keeping it centred | When you get closer the words change ("a few steps away" → "close"). Then **once**: "The bottle should be within reach, straight ahead. Reach out slowly." At that moment it should really be within about an arm's length (measure: note the distance). Guidance then stops: nothing more is said about it |
+| G4 Look at the bottle (still, 3 s), then turn about 90° to the right so it is out of view. Ask "Find my bottle" | "Looking for the bottle. I can't see it right now. I last saw it … ago, on your left …. Turn about 90 degrees to your left, slowly." The angle is approximate (±30° is fine, it is estimated from camera motion). The side must be **left** |
+| G5 Turn left slowly, keep turning | Every 6 s or so "Keep turning left." Once it is in view: "Found the bottle, …" and then the same as G2 and G3 |
+| G6 Start guidance (G1), then cover the camera for 3 s | "I lost sight of the bottle. It was …". Uncover: "Found the bottle, …" again |
+| G7 During guidance, walk towards a chair in your path (or have someone step in front) | The safety warning ("Careful, a chair …") is spoken and **is not cut off by a guidance cue**. Guidance continues about 2 s after the warning |
+| G8a Ask "Find my keys" | Keys are not something SENSE can detect: "I can't look for that. I can find a bottle, cup, …" (no guidance starts) |
+| G8b With no cup anywhere (and none seen this session), ask "Find the cup" | "Looking for the cup. I can't see it right now. Turn slowly in a circle …". "Keep turning slowly." about every 6 s. After about 45 s: "I couldn't find the cup. … Stopping the search." Never "Found". (If a cup was seen earlier, you get the memory sentence of G4 instead) |
+| G9 Start guidance, then press space and say "Stop looking" | "Okay, I stopped looking for …". No more guidance cues |
+| G10 Hide the bottle (move it to another room) where SENSE last saw it, then ask "Find my bottle" | It sends you to the old place, then says "The bottle should be in front of you, but I can't see it. It may have been moved." Never "Found" |
+| G11 Ask "Take me to the door" with a door in view | "Found the door, …" and guidance. Close up (the door fills the view from side to side): "The door is right in front of you. Slow down." |
+
+Notes: "within reach" depends on the distance estimate, which is coarse until you calibrate (section
+5). If it comes too early or too late, write down the real distance. Things whose size SENSE does not
+know (e.g. a person far away who is cut off by the frame) can be guided to but may never get "within
+reach"; guidance then ends after 2 minutes.
+
 ## 5. Distance calibration (optional, recommended)
 
 ```bash

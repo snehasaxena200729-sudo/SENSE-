@@ -22,6 +22,7 @@ from hazards import LoomingDetector, ApproachTracker, SceneHazardDetector
 from people import PersonIdentityGate, count_phrase
 from continuity import ObjectContinuity
 from face_id import FaceID, Enrolment, decide as face_decide
+from guidance import FindGuide
 
 # =====================================================================
 # 1. INITIALIZATION & SETUP
@@ -150,6 +151,9 @@ looming = LoomingDetector()                              # sudden obstacles, any
 approach = ApproachTracker()                             # fast-growing YOLO boxes, other classes
 last_frame_time = None
 track_conf = {}                                          # tid -> smoothed detector confidence
+guide = FindGuide()                                      # "find my bottle" guidance (guidance.py)
+guide_target = None                                      # {"kind": item|person|door|stairs, "name": ...}
+last_guide_seen = (0.0, [])                              # (time, observations) of the last YOLO frame
 
 # Field-test fix: random things were called "phone". A detection now has to be
 # confident ON AVERAGE (exponential moving average per track) and consistent
@@ -514,6 +518,17 @@ def answer_voice_query(user_text):
         speak("Okay, I will speak slower." if intent == "SLOWER" else "Okay, I will speak faster.")
         return
 
+    # "Find my bottle": spoken left / right / straight guidance (guidance.py)
+    if intent == "STOP_FIND":
+        if guide.active:
+            speak(guide.stop("user"))
+        else:
+            speak("I wasn't looking for anything.")
+        return
+    if intent == "FIND":
+        start_find(user_text, current_time)
+        return
+
     # Intent B: Room Overview ("What do you see?") - what is visible right now
     if intent == "OVERVIEW":
         active_items = []
@@ -855,6 +870,82 @@ def forget_command(user_text):
     speak(f"Done. I have forgotten {target}.")
 
 
+def start_find(user_text, now):
+    """Start "find my ..." guidance. The main loop then feeds guide.observe()
+    with every sighting of the target and speaks what guide.poll() returns."""
+    global guide_target
+    target = None
+    for hz in ("door", "stairs"):
+        if hz in user_text or (hz == "stairs" and "stair" in user_text):
+            if scene_hazards is None:
+                speak(f"Door and stairs detection is off, so I can't look for the {hz}.")
+                return
+            target = {"kind": hz, "name": hz}
+            label = f"the {hz}"
+    if target is None:
+        who = asked_about_unverifiable_person(user_text)
+        if who:
+            speak(f"I can't recognise {who.capitalize()} reliably yet. Please introduce them to me again by face.")
+            return
+        found = find_target(user_text)
+        if not found:
+            speak("I can't look for that. I can find a bottle, cup, phone, remote, book, laptop, mouse, "
+                  "chair, bed, table, door, stairs, people I know by face, and items you taught me.")
+            return
+        name = found.lower()
+        if name in {p.lower() for p in known_people}:
+            target = {"kind": "person", "name": name}
+        else:
+            target = {"kind": "item", "name": name}
+        label = spoken_name(found)
+    guide_target = target
+    print(f"🔎 Find mode: {target}")
+
+    seen_t, seen = last_guide_seen
+    visible_now = [o for o in seen if guide_matches(o)] if now - seen_t <= 0.7 else []
+    if visible_now:
+        speak(guide.start_visible(label, now, visible_now[0], cumulative_camera_heading))
+        return
+    speak(guide.start(label, now, find_memory(target, now)))
+
+
+def find_memory(target, now):
+    """Last remembered sighting, for "I last saw it on your left, near the laptop"."""
+    if target["kind"] not in ("item", "person"):
+        return None
+    rec = memory_db.find_latest_memory(target["name"])
+    if rec is None:
+        return None
+    if target["kind"] == "person":
+        since = {p.lower(): t for p, t in known_people.items()}.get(target["name"])
+        if since and rec["last_seen"] < since:
+            return None      # that sighting came from clothing colour, not a face
+    where, turn, same_session = location_words(rec)
+    relation = memory_relation(rec) if same_session and target["kind"] == "item" else None
+    if relation and target["name"].split()[-1] in relation:
+        relation = None      # "the bicycle, next to the yellow bicycle": the same thing twice
+    return {"world_angle": rec.get("world_angle") if same_session else None,
+            "age_text": answers.format_time_ago(now - rec["last_seen"]),
+            "where": where if same_session else f"{where} at that time",
+            "relation": relation,
+            "turn": turn}
+
+
+def guide_matches(o):
+    """Does this sighting belong to the thing we are guiding to?"""
+    if guide_target is None:
+        return False
+    kind, name = guide_target["kind"], guide_target["name"]
+    if kind in ("door", "stairs"):
+        return o.get("cls") == kind
+    if kind == "person":
+        return (o.get("person") or "").lower() == name
+    if name in known_objects:                  # a personal item: only that item
+        return name in o["names"]
+    # a generic class ("bottle") or a remembered label ("white bottle")
+    return name in o["names"] or name.split()[-1] == o.get("cls")
+
+
 def box_iou(a, b):
     ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
     iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
@@ -1132,6 +1223,7 @@ while True:
     active_object_crops.clear()
     frame_observations = {}   # name -> this frame's stable observation (Roadmap E2)
     enrol_candidates = []     # (eye px, track id, face embedding) while enrolling
+    guide_seen = []           # confirmed sightings this frame, for "find my ..." guidance
 
     if boxes is not None and boxes.id is not None:
         for box in boxes:
@@ -1186,7 +1278,8 @@ while True:
                 "name": entity_name,
                 "conf": conf,
                 "box": (x1, y1, x2, y2),
-                "center": (center_x, center_y)
+                "center": (center_x, center_y),
+                "cls_id": int(box.cls[0]),
             })
 
     if should_run_yolo:
@@ -1305,6 +1398,19 @@ while True:
                         display_name = resolver.display_label(eid, winner_name) if eid else winner_name.capitalize()
                         entity_settled = eid is not None and resolver.name_of(eid) is not None
 
+            # "Find my ..." guidance: the detector's own box (not ByteTrack's
+            # Kalman-smoothed one, which lags behind while you walk or turn)
+            gb = raw_detection_box(cand["box"], cand["conf"], cand["cls_id"])
+            gb = (max(0, gb[0]), max(0, gb[1]), min(frame_width, gb[2]), min(frame_height, gb[3]))
+            g_est = est if winner_name == "person" else distance.object_distance(
+                winner_name, gb, frame_width, frame_height, f_px, focal_unc=FOCAL_UNC)
+            guide_seen.append({"names": {display_name.lower(), winner_name}, "cls": winner_name,
+                               "person": verified if winner_name == "person" else None,
+                               "angle": spatial.pixel_to_angle((gb[0] + gb[2]) / 2, frame_width),
+                               "dist_m": g_est.metres,
+                               "max_m": g_est.high if g_est.upper_bound_only else None,
+                               "filled": distance.clipped_edges(gb, frame_width, frame_height) >= {"left", "right"}})
+
             dist_feet = distance.feet_or_none(est)     # None when unknown
             dist_phrase = distance.phrase(est)         # a range or a band, never false precision
 
@@ -1398,8 +1504,33 @@ while True:
     for old_tid in [t for t, d in live_people.items() if current_time - d["last_seen"] > 5]:
         del live_people[old_tid]
 
-    # Roadmap E3: speak at most one (merged) announcement, only if it matters
-    notifier.tick(camera_moving=is_camera_moving, hold=is_listening)
+    # "Find my ..." guidance: feed it this frame's sightings of the target.
+    # Only on frames where a detector ran (a skipped frame is not "not seen").
+    if should_run_yolo:
+        last_guide_seen = (current_time, guide_seen)
+        if guide.active and guide_target["kind"] in ("item", "person"):
+            guide.observe(current_time, [o for o in guide_seen if guide_matches(o)], cumulative_camera_heading)
+    if guide.active and guide_target["kind"] in ("door", "stairs") and scene_hazards is not None \
+            and scene_objects.last_update == current_time:
+        guide.observe(current_time, [
+            {"angle": spatial.pixel_to_angle((o.box[0] + o.box[2]) / 2, frame_width),
+             "dist_m": o.current_distance(current_time), "max_m": None, "filled": o.filled}
+            for o in scene_objects.visible(current_time) if o.cls == guide_target["kind"]],
+            cumulative_camera_heading)
+
+    # Roadmap E3: speak at most one (merged) announcement, only if it matters.
+    # While guiding, only safety alerts (P1) are spoken; other news waits.
+    spoken_now = notifier.tick(camera_moving=is_camera_moving, hold=is_listening or guide.active)
+    if guide.active:
+        # Guidance never talks over anything and always yields to hazards:
+        # it speaks only when SENSE is silent and no safety alert is pending
+        # or was said in the last 2 s.
+        can_guide = (spoken_now is None and not is_speaking() and not is_listening
+                     and notifier.safety_clear())
+        cue = guide.poll(current_time, cumulative_camera_heading, can_speak=can_guide)
+        if cue:
+            print(f"🧭 Guide: {cue}")
+            speak(cue)
     approach.prune(current_time)
     # Stress test (10,000 frames): track_votes / track_conf kept one entry per
     # ByteTrack id ever seen and never shrank. Forget ids unseen for 30 s.
@@ -1413,6 +1544,9 @@ while True:
     # SUB-SYSTEM E: HEADS-UP DISPLAY (HUD)
     # -------------------------------------------------------------
     heading_display = f"HEAD: {int(cumulative_camera_heading)}°"
+    if guide.active:
+        cv2.putText(frame, f"FINDING: {guide.label} ({guide.state})", (20, 65),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
     if is_camera_moving:
         cv2.putText(frame, f"CAM MOVING ({heading_display})", (20, 35), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)

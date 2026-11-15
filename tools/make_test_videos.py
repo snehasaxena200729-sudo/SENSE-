@@ -14,6 +14,7 @@ test guide).
   still_near.mp4     stand ~1.6 m from the objects (nothing should be said)
   pan_near.mp4       turn the head past the objects at ~1.6 m (nothing said)
   approach_door.mp4  walk towards a door
+  find_item.mp4      see the objects, turn away, turn back, walk up ("find the ...")
   people.mp4         person A, empty room, person A (another photo), others
 
 Suggested photos: any photo with a bicycle/chair/dog in it (e.g. the classic
@@ -64,6 +65,39 @@ def zoom_clip(img_path, out, tx, ty, z0, z1, secs, hold, pan=0.0, seed=0):
     print(out, n + m, "frames")
 
 
+def find_clip(img_path, out, tx, ty, seed=0):
+    """'Find the ...' test (guidance.py). The camera sees the object (4 s), turns
+    LEFT away from it (3 s), waits (3 s, the question is asked here), turns back
+    right (3 s), walks up to it (6 s) and stops (2 s)."""
+    img = cv2.imread(img_path)
+    if img is None:
+        raise SystemExit(f"cannot read {img_path}")
+    h, w = img.shape[:2]
+    s = max(W / w, H / h)
+    img = cv2.resize(img, (int(w * s) + 2, int(h * s) + 2))
+    h, w = img.shape[:2]
+    rng = np.random.default_rng(seed)
+    canvas = cv2.GaussianBlur(rng.normal(120, 18, (h * 3, w * 5, 3)).clip(0, 255).astype(np.uint8), (5, 5), 0)
+    oy, ox = h, 2 * w
+    canvas[oy:oy + h, ox:ox + w] = img
+    turn = 1.5 * w                     # about 60 degrees at the starting zoom
+    z0, z1 = 0.6, 2.6
+    plan = ([(0.0, z0)] * 60 + [(-turn * k / 45, z0) for k in range(45)] + [(-turn, z0)] * 45
+            + [(-turn + turn * k / 45, z0) for k in range(45)]
+            + [(0.0, z0 * (z1 / z0) ** (k / 90)) for k in range(90)] + [(0.0, z1)] * 30)
+    vw = _writer(out)
+    for i, (dx, z) in enumerate(plan):
+        cx = ox + tx * w + dx + 8 * np.sin(i / 4)
+        cy = oy + ty * h + 5 * np.cos(i / 6)
+        x0, y0 = int(cx - W / (2 * z)), int(cy - H / (2 * z))
+        f = cv2.resize(canvas[y0:y0 + int(H / z), x0:x0 + int(W / z)], (W, H))
+        if i % 9 == 4:
+            f = cv2.GaussianBlur(f, (9, 9), 0)
+        vw.write(np.clip(f + rng.normal(0, 3, f.shape), 0, 255).astype(np.uint8))
+    vw.release()
+    print(out, len(plan), "frames")
+
+
 def people_clip(out, a1, a2, others):
     """A 0-59, empty 60-89, A (other photo) 90-149, then each other person 60 frames."""
     def fit(path):
@@ -104,6 +138,7 @@ def main():
         zoom_clip(a.objects, j("approach_far.mp4"), 0.45, 0.5, 0.5, 2.2, 6, 3)
         zoom_clip(a.objects, j("still_near.mp4"), 0.45, 0.5, 1.4, 1.4, 0.1, 8)
         zoom_clip(a.objects, j("pan_near.mp4"), 0.45, 0.5, 1.3, 1.3, 0.1, 8, pan=0.8)
+        find_clip(a.objects, j("find_item.mp4"), 0.45, 0.5)
     if a.door:
         zoom_clip(a.door, j("approach_door.mp4"), 0.5, 0.5, 0.6, 3.0, 7, 3)
     if a.person_a:
