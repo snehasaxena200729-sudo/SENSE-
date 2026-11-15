@@ -129,8 +129,6 @@ TABLES = ["live_memory", "live_people", "track_votes", "track_conf", "track_lock
           "active_people_crops", "active_object_crops", "face_eye_px", "last_db_write"]
 
 cv2.imshow = lambda *a, **k: None
-cv2.namedWindow = lambda *a, **k: None        # headless: no window (a GUI OpenCV build would abort here)
-cv2.setWindowProperty = lambda *a, **k: None
 def _wait(*a, **k):
     now = time.perf_counter()
     if state["t_last"] is not None:
@@ -189,8 +187,6 @@ else:
     memory_db.DB_PATH = os.path.join(tmp, "sense_memory.db")
 
 os.chdir(ROOT)
-os.environ["SENSE_NO_TERMINAL_KEYS"] = "1"     # keys are scripted; leave the terminal alone
-os.environ["SENSE_SKIP_WHISPER_PRELOAD"] = "1"  # questions are scripted text; no Whisper needed
 sys.argv = ["sense_master.py", "--source", video]
 t0 = time.time()
 try:
