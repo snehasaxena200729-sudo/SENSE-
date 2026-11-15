@@ -6,7 +6,7 @@
 
 ultralytics          # YOLOv8 + built-in ByteTrack (also installs torch)
 lap                  # needed by ByteTrack; install now so Ultralytics never pip-installs it at runtime
-opencv-python        # camera, Lucas-Kanade optical flow, histograms, HUD window
+opencv-python>=4.8   # 4.8+ needed for the face models (YuNet 2023). camera, Lucas-Kanade optical flow, histograms, HUD window
 numpy
 SpeechRecognition    # microphone capture + recognize_whisper wrapper
 openai-whisper       # local Whisper speech-to-text (weights cached in ~/.cache/whisper after first run)

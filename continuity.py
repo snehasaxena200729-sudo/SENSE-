@@ -105,6 +105,7 @@ class TrackedObject:
         self.anchor = None                  # absolute distance + box sizes when it was measured
         self.last_d = None
         self.filled = False
+        self.last_edges = set()             # frame edges the last box touched
         self.armed = True                   # may give a proximity alert
         self.last_approach_t = -1e9
         self.closing_rate = 0.0             # last fitted closing rate (log-distance per second)
@@ -135,6 +136,7 @@ class TrackedObject:
         Turning the head moves a box but does not change its size, so it is
         not mistaken for approaching."""
         edges = dist_mod.clipped_edges(box, frame_w, frame_h)
+        self.last_edges = set(edges)
         w, h = box[2] - box[0], box[3] - box[1]
         lateral = edges & {"left", "right"}
         # Cut off at ONE side edge: the object is entering or leaving the view
@@ -296,12 +298,29 @@ class ObjectContinuity:
         out = []
         for obj in self.objects.values():
             if obj.last_seen < (self.last_update or now):
-                continue                                  # not seen right now
+                # Not seen right now. One case still matters: a LOW object (bed,
+                # low table, step) you were walking towards slid off the BOTTOM
+                # of the view - a chest-height camera loses it ~2 m before you
+                # reach it. Warn if, at the pace measured, it is near by now.
+                if (obj.armed and "bottom" in obj.last_edges and obj.last_d is not None
+                        and not obj.last_edges & {"left", "right"}
+                        and abs(spatial.pixel_to_angle(_center(obj.box)[0], frame_w)) <= AHEAD_DEG
+                        and obj.last_seen - obj.last_approach_t <= RECENT_APPROACH_S
+                        and now - obj.last_seen <= MAX_COAST_S):
+                    ahead = now - obj.last_seen + LOOKAHEAD_S
+                    if obj.last_d * math.exp(-obj.closing_rate * ahead) <= NEAR_M:
+                        obj.armed = False
+                        out.append((obj, "low down, close ahead"))
+                continue
             d = obj.current_distance(now)
             if d is None:
                 continue
             if not obj.armed:
-                if d > REARM_M:
+                # re-arm only when CLEARLY further away: the last 3 distances all
+                # beyond REARM_M (one glitchy estimate - a cut-off box that
+                # jitters inside the frame edge - must not re-arm; stress test)
+                recent = [m[3] for m in list(obj.samples)[-3:]]
+                if len(recent) == 3 and all(x is not None and x > REARM_M for x in recent):
                     obj.armed = True
                 continue
             cx, _ = _center(obj.box)

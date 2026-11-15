@@ -42,10 +42,17 @@ models (YuNet 0.2 MB + SFace 37 MB, checksum-verified, into `models/`) (and `lap
 
 SENSE also speaks **on its own**:
 
-- **Always:** a warning when something is ahead and getting closer fast. Two checks run on every
-  frame: any object YOLO knows growing quickly in the middle of the view, and a camera-only
-  "looming" check (`hazards.py`) that works even for things YOLO has no name for, such as walls,
-  doors or boxes, by measuring how fast the image expands (time to contact).
+- **Always:** a warning when you are walking into something ahead.
+  - Doors, stairs, chairs, beds, tables, couches, people and the other walk-into classes keep **one identity** while
+    you move (`continuity.py`), and you get **one** warning per approach, about 1.5 to 2 m before
+    contact: "Careful, a chair in front of you, about 5 to 7 feet away". It is said again only after
+    you have clearly moved away (beyond about 2.8 m) and come back. Standing still near something,
+    turning your head past it, or someone reappearing closer does not trigger it.
+  - A low object (a bed) that slides out of the bottom of the view while you walk towards it still
+    gets a warning ("low down, close ahead").
+  - Other YOLO classes: a warning when the box grows quickly in the middle of the view.
+  - A camera-only "looming" check (`hazards.py`) works even for things YOLO has no name for, such as
+    walls or boxes, by measuring how fast the image expands (time to contact).
 - **Normal mode:** your named items moving or disappearing, and known people arriving or leaving.
 - **"Talk more" mode:** every change it notices.
 
@@ -60,11 +67,15 @@ SENSE also speaks **on its own**:
 | `spatial.py` | **World-anchored directions** (stored angle + heading), turn instructions, nearby-object relations |
 | `answers.py` | **Intents, fuzzy name matching, confidence scoring** (confirmed / likely / uncertain) and wording |
 | `hazards.py` | **Sudden-obstacle warnings:** time-to-contact from optical-flow divergence (any textured object) and box-growth checks for every YOLO class |
+| `continuity.py` | **Object continuity + proximity.** Keeps one identity per object while you walk (camera-motion-compensated matching, ByteTrack id as a hint, no stale boxes), measures approach from the size trend along an axis that is not cut off, one alert per approach |
 | `distance.py` | **Monocular distance with error ranges.** Focal length from resolution (or calibration), cut-off box detection, coarse spoken bands |
 | `face_id.py` | **Face identity.** OpenCV YuNet finds the face, SFace turns it into 128 numbers; a name needs cosine similarity >= 0.363, a margin over everyone else, and a good frontal face. Enrolment collects 5 samples without blocking |
 | `people.py` | **Person naming gate.** Detection (YOLO) and tracking (ByteTrack) never say who someone is; a name is spoken only after a verified identity check agrees 3 of the last 5 times |
 | `memory_db.py` | SQLite tables: `environmental_memory` (latest state), `events` (history), `entities`, people and personal-item profiles, `settings` |
 | `tests/` | Unit tests: `python -m unittest discover -s tests -v` |
+| `tools/run_checks.py` | **All automated checks in one command**: unit + regression tests, and full-app scenarios on clips made by `tools/make_test_videos.py` (walk towards objects, stand still, turn the head, walk to a door, introduce someone / leave / come back / strangers) |
+| `tools/smoke_run.py` | Runs the real app headless on a video and prints what it would have said (`--loop --stats-every 250 --json out.json` for long stress runs) |
+| `tools/stress_logic.py` | 10,000 randomised iterations of the continuity, naming, notifier and database logic with invariant checks |
 
 The other `.py` files in the root are earlier learning prototypes and are not used by the app.
 Note that `voice_sense.py` and `test_mic.py` use Google's *online* speech API.
@@ -107,4 +118,6 @@ internally (PyTorch, OpenCV, PortAudio) are not managed by the app.
 - Obstacle warnings need some texture or a known object: blank walls, glass and stairs going down
   can be missed, and sudden lighting changes can cause a false warning. They are an aid, not a
   safety guarantee.
-- People are recognised by clothing colour, which is not reliable across days.
+- Proximity warnings rely on the detector seeing the object. Close up, detectors lose objects (the
+  door model drops most doors within about 1.5 m), which is why the warning comes early. Objects YOLO
+  does not know, glass, and blank walls rely on the looming check only.

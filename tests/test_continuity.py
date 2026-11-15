@@ -179,6 +179,34 @@ class TestContinuity(unittest.TestCase):
             sim.step(i, [("chair", "chair", 0.0, 1.3, 0.9, 0.5)]); i += 1
         self.assertEqual(sim.alerts, [])
 
+    def test_low_bed_that_slides_out_of_view_still_alerts_once(self):
+        """Stress-test finding: a chest-height camera loses a low bed off the
+        bottom of the view ~2 m before you reach it."""
+        sim = Sim()
+        truth = []
+        for i in range(int(4 * FPS)):
+            d = 3.8 - 0.75 * i / FPS
+            truth.append(d)
+            sim.step(i, [("bed", "bed", 0.0, d, 0.6, 1.6)])
+        self.assertEqual(len(sim.alerts), 1, sim.alerts)
+        self.assertGreater(truth[sim.alerts[0][0]], 1.0)
+
+    def test_one_bad_estimate_does_not_rearm(self):
+        t = continuity.ObjectContinuity({"chair"})
+        obj = continuity.TrackedObject(1, "chair", (0, 0, 10, 10), 0.0)
+        obj.armed = False
+        t.objects[1] = obj
+        t.last_update = 0.0
+        for k, d in enumerate([1.4, 3.0, 1.4]):
+            obj.samples.append((k * 0.1, "w", 100.0, d))
+        t.proximity_alerts(0.2, 1280)
+        self.assertFalse(obj.armed)
+        for k, d in enumerate([3.0, 3.1, 3.2]):
+            obj.samples.append((0.3 + k * 0.1, "w", 100.0, d))
+        obj.last_seen = t.last_update = 0.5
+        t.proximity_alerts(0.5, 1280)
+        self.assertTrue(obj.armed)
+
     def test_stalled_loop_keeps_identity(self):
         """A 3.5 s stall (model loading, slow frame) with NO detector runs is not
         a disappearance: nothing was looked for, so nothing was missed."""

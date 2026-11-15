@@ -1,0 +1,172 @@
+"""
+tools/run_checks.py - every automated check, in one command, with PASS/FAIL.
+
+    python tools/run_checks.py                 # unit + regression tests only
+    python tools/run_checks.py --videos DIR    # + full-app scenarios on clips
+                                               #   from tools/make_test_videos.py
+
+Unit / regression: everything in tests/ (pure logic, no camera).
+Scenarios: the REAL sense_master.py loop runs headless on each clip through
+tools/smoke_run.py (same YOLO, ByteTrack, face, memory, notifier code), and
+what SENSE would have said is checked against what it should say.
+
+What this does NOT cover - see the physical test guide: the real webcam, the
+microphone and Whisper, the `say` voice, walking with the camera, lighting.
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def said(run, pattern):
+    """Sentences SENSE spoke (not the scripted questions) matching a regex."""
+    return [t for _, t in run["spoken"] if not t.startswith("[asked:") and re.search(pattern, t, re.I)]
+
+
+def answer_to(run, question):
+    """What SENSE said right after a scripted question."""
+    sp = run["spoken"]
+    for k, (_, t) in enumerate(sp):
+        if t == f"[asked: {question}]":
+            return sp[k + 1][1] if k + 1 < len(sp) else ""
+    return None
+
+
+def no_errors(run):
+    return [] if not run["error"] else ["exception: " + run["error"].strip().splitlines()[-1]]
+
+
+def check_approach(run):
+    errs = no_errors(run)
+    alerts = said(run, r"^Careful")
+    bikes = [a for a in alerts if "bicycle" in a]
+    if len(bikes) != 1:
+        errs.append(f"expected exactly 1 bicycle proximity alert, got {len(bikes)}: {alerts}")
+    if len(alerts) != len(set(alerts)):
+        errs.append(f"repeated alert: {alerts}")
+    return errs
+
+
+def check_quiet(run):
+    errs = no_errors(run)
+    alerts = said(run, r"^Careful")
+    if alerts:
+        errs.append(f"false proximity alert(s): {alerts}")
+    return errs
+
+
+def check_door(run):
+    errs = no_errors(run)
+    seen = said(run, r"^Door ")
+    near = said(run, r"^Careful, a door")
+    if len(seen) != 1:
+        errs.append(f"expected the door announced once, got {seen}")
+    if len(near) != 1:
+        errs.append(f"expected exactly 1 door proximity alert, got {near}")
+    return errs
+
+
+def check_people(name, legacy):
+    def check(run):
+        errs = no_errors(run)
+        if not said(run, rf"recognise {name} by face"):
+            errs.append(f"enrolment of {name} not confirmed")
+        sp = [(f, t) for f, t in run["spoken"]]
+        answers = {}
+        for k, (f, t) in enumerate(sp):
+            if t.startswith("[asked:") and k + 1 < len(sp):
+                answers.setdefault(t, []).append((f, sp[k + 1][1]))
+        see = answers.get("[asked: what do you see]", [])
+        back = [t for f, t in see if 90 <= f < 150]
+        others = [t for f, t in see if f >= 150]
+        if not back or name.lower() not in back[0].lower():
+            errs.append(f"{name} not recognised after leaving and coming back: {back}")
+        if any(name.lower() in t.lower() for t in others):
+            errs.append(f"someone else was called {name}: {others}")
+        names_said = set(re.findall(r"\b([A-Z][a-z]+) (?:is here|in front|on your)", " ".join(t for _, t in sp)))
+        stray = names_said - {name, "Careful", "Door", "Currently"}
+        if stray:
+            errs.append(f"unexpected names spoken: {stray}")
+        if legacy:
+            ans = answers.get(f"[asked: where is {legacy.lower()}]", [(0, "")])[0][1]
+            if "again by face" not in ans:
+                errs.append(f"old clothing-colour profile '{legacy}' not handled honestly: {ans!r}")
+        return errs
+    return check
+
+
+def run_clip(path, frames, questions, tag):
+    out = os.path.join(tempfile.gettempdir(), f"sense_check_{tag}.json")
+    cmd = [sys.executable, os.path.join(ROOT, "tools", "smoke_run.py"), path, str(frames),
+           *questions, "--json", out]
+    t0 = time.time()
+    subprocess.run(cmd, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800)
+    with open(out) as f:
+        run = json.load(f)
+    run["took"] = time.time() - t0
+    return run
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--videos", help="folder made by tools/make_test_videos.py")
+    ap.add_argument("--name", default="Alex", help="name to teach for person A in people.mp4")
+    ap.add_argument("--legacy", default=None,
+                    help="a name taught with the OLD clothing method in your sense_memory.db, e.g. Sneha")
+    args = ap.parse_args()
+
+    results = []
+    print("== Unit and regression tests (tests/)")
+    r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests"], cwd=ROOT,
+                       capture_output=True, text=True)
+    tail = (r.stderr or r.stdout).strip().splitlines()
+    summary = next((l for l in reversed(tail) if l.startswith("Ran ")), "?")
+    results.append(("unit + regression tests", r.returncode == 0,
+                    [] if r.returncode == 0 else tail[-15:], summary + " " + tail[-1]))
+
+    if args.videos:
+        n = args.name
+        scenarios = [
+            ("walk towards objects", "approach_far.mp4", 150, [], check_approach),
+            ("stand still near objects", "still_near.mp4", 120, [], check_quiet),
+            ("turn the head past objects", "pan_near.mp4", 120, [], check_quiet),
+            ("walk towards a door", "approach_door.mp4", 150, [], check_door),
+            ("introduce, leave, come back, strangers", "people.mp4", 308,
+             [f"this is {n.lower()}@10", "what do you see@140", "what do you see@200",
+              f"where is {n.lower()}@205", "who was here today@265"]
+             + ([f"where is {args.legacy.lower()}@300"] if args.legacy else []),
+             check_people(n, args.legacy)),
+        ]
+        for title, clip, frames, qs, check in scenarios:
+            path = os.path.join(args.videos, clip)
+            if not os.path.exists(path):
+                results.append((title, None, [f"skipped: {clip} not found"], ""))
+                continue
+            print(f"== Scenario: {title} ({clip})")
+            run = run_clip(path, frames, qs, clip.split(".")[0])
+            errs = check(run)
+            spoken = [f"[{f}] {t}" for f, t in run["spoken"][1:]]
+            results.append((title, not errs, errs, f"{run['frames']} frames in {run['took']:.0f} s; said: "
+                            + (" | ".join(spoken) or "nothing")))
+
+    print("\n================ RESULTS ================")
+    failed = 0
+    for title, ok, errs, info in results:
+        status = "SKIP" if ok is None else ("PASS" if ok else "FAIL")
+        failed += ok is False
+        print(f"{status}  {title}\n      {info}")
+        for e in errs:
+            print(f"      - {e}")
+    print(f"\n{failed} failed.")
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()
