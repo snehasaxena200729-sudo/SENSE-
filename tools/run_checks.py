@@ -73,6 +73,34 @@ def check_door(run):
     return errs
 
 
+GUIDE_RE = r"^(Found |Straight ahead|A little to your|On your (left|right)|Keep turning|I lost sight|.* should be within reach|.* is right in front of you)"
+
+
+def check_find(run):
+    """'find the bicycle' after turning away: memory -> turn right -> found -> guided -> arrived."""
+    errs = no_errors(run)
+    first = answer_to(run, "find the bicycle") or ""
+    if not first.startswith("Looking for the bicycle"):
+        errs.append(f"find not started: {first!r}")
+    if "to your right" not in first or "to your left" in first:
+        errs.append(f"memory fallback should say turn right (the camera turned left away): {first!r}")
+    k = next(i for i, (_, t) in enumerate(run["spoken"]) if t == "[asked: find the bicycle]")
+    after = run["spoken"][k + 2:]
+    guide = [(f, t) for f, t in after if re.search(GUIDE_RE, t)]
+    if not any(t.startswith("Found the bicycle") for _, t in guide):
+        errs.append(f"bicycle never announced as found: {after}")
+    done = [t for _, t in guide if "right in front of you" in t or "within reach" in t]
+    if len(done) != 1:
+        errs.append(f"expected exactly one arrival message, got {done}")
+    for (f0, a), (f1, b) in zip(guide, guide[1:]):
+        if (f1 - f0) / 15.0 < (0.8 if b in done else 1.5) - 0.07:
+            errs.append(f"guidance cues too close: {a!r} -> {b!r}")
+    alerts = said(run, r"^Careful")
+    if len(alerts) != len(set(alerts)):
+        errs.append(f"repeated alert: {alerts}")
+    return errs
+
+
 def check_people(name, legacy):
     def check(run):
         errs = no_errors(run)
@@ -138,6 +166,7 @@ def main():
             ("stand still near objects", "still_near.mp4", 120, [], check_quiet),
             ("turn the head past objects", "pan_near.mp4", 120, [], check_quiet),
             ("walk towards a door", "approach_door.mp4", 150, [], check_door),
+            ("find an item: memory, turn, walk up", "find_item.mp4", 315, ["find the bicycle@150"], check_find),
             ("introduce, leave, come back, strangers", "people.mp4", 308,
              [f"this is {n.lower()}@10", "what do you see@140", "what do you see@200",
               f"where is {n.lower()}@205", "who was here today@265"]

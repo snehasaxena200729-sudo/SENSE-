@@ -28,6 +28,11 @@ import math
 INTENT_PATTERNS = [
     ("FORGET",   ["forget"]),
     ("RENAME",   ["rename", "change the name", "change name", "change my", "call my"]),
+    # "Find my ..." guidance (guidance.py). STOP_FIND first: "stop looking for it"
+    ("STOP_FIND", ["stop searching", "stop looking", "stop finding", "stop guiding", "cancel",
+                   "never mind", "nevermind", "i found it", "found it", "i've got it", "i have it"]),
+    ("FIND",     ["find ", "guide me to", "take me to", "look for", "search for", "locate",
+                  "help me get to"]),
     ("LEARN",    ["this is", "my name is", "remember as", "call this", "call it"]),
     ("QUIET",    ["be quiet", "quiet mode", "stop talking", "silent mode", "fewer alerts"]),
     ("VERBOSE",  ["talk more", "verbose", "tell me everything", "more alerts"]),

@@ -44,6 +44,7 @@ class Notifier:
         self._order = itertools.count()
         self.last_spoken_key_at = {}
         self.last_spoken_at = -1e9
+        self.last_p1_at = -1e9      # "find my ..." guidance waits after a safety alert
 
     def set_level(self, level):
         if level in LEVELS:
@@ -61,6 +62,14 @@ class Notifier:
         heapq.heapify(self.pending)
         heapq.heappush(self.pending, (priority, next(self._order), now, key, text))
         return True
+
+    def safety_clear(self, quiet_after_p1_s=2.0):
+        """True when no safety (P1) alert is waiting and none was spoken in the last
+        quiet_after_p1_s seconds. Guidance cues ("a little left") only speak then,
+        so they can never drown out or crowd a hazard warning."""
+        now = self.clock()
+        waiting_p1 = any(p[0] == P1 and now - p[2] <= self.MAX_WAIT_S for p in self.pending)
+        return not waiting_p1 and now - self.last_p1_at >= quiet_after_p1_s
 
     def tick(self, camera_moving=False, hold=False):
         """Call once per frame. Returns the sentence spoken, or None.
@@ -85,6 +94,8 @@ class Notifier:
         sentence = " ".join(text if text.endswith(".") else text + "." for _, _, _, _, text in batch)
         self.speak_fn(sentence)
         self.last_spoken_at = now
+        if top_priority == P1:
+            self.last_p1_at = now
         for _, _, _, key, _ in batch:
             self.last_spoken_key_at[key] = now
         return sentence

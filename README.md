@@ -28,6 +28,8 @@ models (YuNet 0.2 MB + SFace 37 MB, checksum-verified, into `models/`) (and `lap
 | --- | --- |
 | "What do you see?" | Lists what is visible right now, with distance |
 | "Where is my phone?" | Answers live if it's visible. Otherwise gives the last place it was seen, the direction from where you face *now* ("turn about 90 degrees to your right"), a nearby object ("next to the laptop"), and how sure it is |
+| "Find my bottle" / "Help me find my phone" / "Take me to the door" | **Guides you to it** with short cues as you turn and walk: "a little to your left", "straight ahead, a few steps away", then "your bottle should be within reach". If it is not in view, it uses memory ("I last saw it 2 minutes ago, on your left, next to the laptop. Turn about 90 degrees to your left") and updates the turn as you turn. Hazard warnings always come first. See `docs/FIND_MODE.md` |
+| "Stop looking" / "Cancel" / "I found it" | Ends the guidance |
 | "What changed?" | Summarises what moved, disappeared or appeared since you last asked (max 30 minutes back) |
 | "Where was my bottle before?" | Uses the event history to say where it was before it moved |
 | "When did you last see my keys?" | Gives the time of the last sighting |
