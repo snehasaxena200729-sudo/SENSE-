@@ -101,7 +101,7 @@ class ApproachTracker:
     def __init__(self):
         self.history = {}      # tid -> deque[(time, height_fraction)]
 
-    def update(self, tid, now, box_h, frame_h, angle_deg):
+    def update(self, tid, now, box_h, frame_h, angle_deg, is_person=False):
         hist = self.history.setdefault(tid, deque())
         frac = box_h / float(frame_h)
         hist.append((now, frac))
@@ -113,8 +113,11 @@ class ApproachTracker:
         if not older:
             return False
         growth = frac / max(1e-3, older[0])
-        return growth > self.GROWTH_ALERT and (frac > 0.25 or growth > 1.4) or \
-            (frac > self.BIG_FRACTION and growth > 1.05)
+        if growth > self.GROWTH_ALERT and (frac > 0.25 or growth > 1.4):
+            return True
+        # 'suddenly fills the view' rule is skipped for people: someone sitting at
+        # the webcam always fills the view and must not trigger warnings (field test 2)
+        return not is_person and frac > self.BIG_FRACTION and growth > 1.05
 
     def prune(self, now, max_age_s=3.0):
         for tid in [t for t, h in self.history.items() if not h or now - h[-1][0] > max_age_s]:

@@ -36,7 +36,7 @@ model = YOLO("yolov8s.pt")
 camera = cv2.VideoCapture(video_source)
 
 recognizer = sr.Recognizer()
-recognizer.pause_threshold = 1.3
+recognizer.pause_threshold = 1.0   # silence that ends a question (was 1.3 s)
 recognizer.energy_threshold = 300
 
 # High-Speed Optical Flow Parameters (winSize 31x31, Level 3)
@@ -791,35 +791,44 @@ def check_hazard(tid, display_name, category, box_h, dist_feet, center_x, frame_
 
 EARCON = "/System/Library/Sounds/Tink.aiff"   # short macOS sound: "speak now"
 WHISPER_JUNK = {"", "listening", "you", "thank you", "thanks for watching", "bye"}
+LISTEN_START_TIMEOUT_S = 5.0     # time to START speaking (as before PR #3: 4.5)
+LISTEN_MAX_PHRASE_S = 5.0        # longest question (as before PR #3). Noise can keep the
+                                 # mic "hearing speech", so this cap is the worst case.
 
 def listen_in_background():
-    """Listener thread: prompt, record, transcribe. Never answers (main thread does).
+    """Listener thread: cue, record, transcribe. Never answers (main thread does).
 
-    Field-test fix (voice window closed after ~1 s): the old code started the
-    microphone 0.7 s after starting to say "Listening.", so the mic heard SENSE's
-    own voice, treated it as the question and stopped. Now we WAIT for the
-    prompt to finish, play a short beep, calibrate to the room's noise, and give
-    the user up to 7 s to start and 8 s to speak.
+    Speed fix (krish, field test 2): PR #3 waited for a spoken "Listening.",
+    then a beep, then 0.4 s of noise calibration, and allowed 8 s phrases:
+    about 1.5 s extra before the mic opened and up to 3 s extra recording.
+    Now: stop any speech, play only the short beep (~0.15 s, it has ended
+    before the mic opens, so the mic cannot hear SENSE), then record with the
+    old limits. Timings are printed so slow steps are visible.
     """
     global is_listening
     is_listening = True
+    t0 = time.time()
     try:
         subprocess.run(["killall", "say"], stderr=subprocess.DEVNULL)
-        subprocess.run(["say", "-r", str(speech_rate), "Listening."], timeout=5)  # blocks until spoken
         if os.path.exists(EARCON):
             subprocess.run(["afplay", EARCON], timeout=2, stderr=subprocess.DEVNULL)
+        else:  # non-Mac fallback: a very short spoken cue, finished before the mic opens
+            subprocess.run(["say", "-r", str(speech_rate), "Yes?"], timeout=3)
         with sr.Microphone() as source:
-            print("\n🎙️ Listening now... (Say: 'This is my water bottle' or 'Where is the bottle?')")
-            recognizer.adjust_for_ambient_noise(source, duration=0.4)
-            recognizer.energy_threshold = max(recognizer.energy_threshold, 300)
-            audio = recognizer.listen(source, timeout=7.0, phrase_time_limit=8.0)
+            t_mic = time.time()
+            print(f"\n🎙️ Listening now... (mic open after {t_mic - t0:.2f}s)")
+            audio = recognizer.listen(source, timeout=LISTEN_START_TIMEOUT_S,
+                                      phrase_time_limit=LISTEN_MAX_PHRASE_S)
+        t_rec = time.time()
         # Microphone is released before the (slower) transcription
         text = recognizer.recognize_whisper(
             audio,
             model="tiny",
             initial_prompt="Sneha, Mummy, water bottle, medicine bottle, phone, laptop, rename, forget."
         ).strip()
-        print(f"👂 Heard: '{text}'")
+        t_done = time.time()
+        print(f"👂 Heard: '{text}'  ⏱ recorded {t_rec - t_mic:.1f}s, Whisper {t_done - t_rec:.1f}s, "
+              f"total {t_done - t0:.1f}s since space")
         if text.lower().strip(" .!?,") in WHISPER_JUNK:
             voice_queue.put(("error", "I didn't hear a question. Press space and speak after the beep."))
         else:
@@ -958,8 +967,14 @@ while True:
             # whitelist), on fresh detections only, even while walking.
             if should_run_yolo and conf >= 0.35 and approach.update(
                     track_id, current_time, y2 - y1, frame_height,
-                    spatial.pixel_to_angle(center_x, frame_width)):
-                what = "someone" if raw_name == "person" else f"a {raw_name}"
+                    spatial.pixel_to_angle(center_x, frame_width),
+                    is_person=(raw_name == "person")):
+                if raw_name == "person":
+                    # use the name the HUD already shows for this track (field test 2)
+                    locked = track_locked_identities.get(track_id)
+                    what = locked if locked and locked not in ("Unfamiliar Person", "Person") else "someone"
+                else:
+                    what = f"a {raw_name}"
                 notifier.push(P1, f"approach:{track_id}", f"Careful, {what} right in front of you")
 
             if raw_name == "person":

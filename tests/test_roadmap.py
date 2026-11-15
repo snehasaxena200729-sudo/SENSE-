@@ -278,6 +278,10 @@ class TestHazards(unittest.TestCase):
         t = self.hazards.ApproachTracker()
         self.assertFalse(t.update(1, 0.0, 120, 480, 0))
         self.assertTrue(t.update(1, 0.4, 180, 480, 0))      # 25% -> 37% of the view
+        # someone sitting at the webcam fills the view: no warning without real growth
+        t3 = self.hazards.ApproachTracker()
+        t3.update(3, 0.0, 300, 480, 0, is_person=True)
+        self.assertFalse(t3.update(3, 0.4, 320, 480, 0, is_person=True))
         t2 = self.hazards.ApproachTracker()
         t2.update(2, 0.0, 120, 480, 40)
         self.assertFalse(t2.update(2, 0.4, 180, 480, 40))   # off to the side
