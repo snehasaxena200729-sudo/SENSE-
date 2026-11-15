@@ -29,6 +29,8 @@ from people import PersonIdentityGate, count_phrase
 parser = argparse.ArgumentParser(description="SENSE Master Assistive System")
 parser.add_argument("--source", default="0",
                     help="Camera index (e.g. 0) or path to a video file for repeatable testing")
+parser.add_argument("--scene-model", default="yolov8n-oiv7.pt",
+                    help="door/stairs model; try yolov8s-oiv7.pt if tools/check_doors.py shows it sees your door better")
 args = parser.parse_args()
 video_source = int(args.source) if args.source.isdigit() else args.source
 
@@ -38,13 +40,13 @@ model = YOLO("yolov8s.pt")
 # Doors / stairs: COCO has no such classes, so a small Open Images model is used
 # (downloaded once on the first run, then offline). SENSE still works without it.
 try:
-    scene_hazards = SceneHazardDetector(YOLO("yolov8n-oiv7.pt"))
+    scene_hazards = SceneHazardDetector(YOLO(args.scene_model))
     if not scene_hazards.class_ids:
         raise ValueError("model has no door/stairs classes")
     print(f"🚪 Door/stairs detection on: {sorted(set(scene_hazards.class_ids.values()))}")
 except Exception as e:
     scene_hazards = None
-    print(f"🚪 Door/stairs detection off ({e}). Connect to the internet once to download yolov8n-oiv7.pt.")
+    print(f"🚪 Door/stairs detection off ({e}). Connect to the internet once to download {args.scene_model}.")
 camera = cv2.VideoCapture(video_source)
 
 recognizer = sr.Recognizer()
@@ -425,7 +427,13 @@ def answer_voice_query(user_text):
         for hz_name in scene_hazards.HAZARD_NAMES:
             if hz_name in user_text or (hz_name == "stairs" and "stair" in user_text):
                 d = scene_hazards.seen.get(hz_name)
-                if d and current_time - d["time"] <= scene_hazards.VISIBLE_S:
+                handle = scene_hazards.seen.get(scene_hazards.HANDLE) if hz_name == "door" else None
+                if (not d or current_time - d["time"] > scene_hazards.VISIBLE_S) and handle \
+                        and current_time - handle["time"] <= scene_hazards.VISIBLE_S:
+                    # only the handle is visible: say exactly that (audit fix 3)
+                    speak(f"I can't see the whole door, but there is a door handle "
+                          f"{spatial.direction_phrase(handle['angle'])}.")
+                elif d and current_time - d["time"] <= scene_hazards.VISIBLE_S:
                     speak(f"There is a {hz_name} {spatial.direction_phrase(d['angle'])}.")
                 elif d:
                     speak(f"I saw a {hz_name} {answers.format_time_ago(current_time - d['time'])}, "

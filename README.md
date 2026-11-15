@@ -85,6 +85,11 @@ internally (PyTorch, OpenCV, PortAudio) are not managed by the app.
   "about 4 to 6 feet away", "within arm's reach", "closer than about 7 feet" (when you are cut
   off by the frame edge) or "distance unclear". Calibrate your camera once and check the error
   with a tape measure: `python tools/validate_distance.py --live --person-height 1.70 --save`.
+- **Doors are the weakest detection.** The main model (COCO) has no door class. The Open Images model
+  does, but in synthetic tests a flush white door with a faint frame scored under 0.15, and a door cut
+  off at the top scored near 0. A door handle inside a weak door box now counts as evidence. Measure
+  your own door with `python tools/check_doors.py photos/ --models yolov8n-oiv7.pt yolov8s-oiv7.pt`;
+  if the small model does better, start SENSE with `--scene-model yolov8s-oiv7.pt`.
 - **People are "a person" unless verified.** Earlier versions named people from the colour of
   their clothes, which matched different people (8 of 15 pairs in a test). That is removed.
 

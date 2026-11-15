@@ -299,7 +299,7 @@ class TestSceneHazards(unittest.TestCase):
 
         def predict(self, frame, classes=None, **kw):
             self.calls += 1
-            assert set(classes) == {164, 489}
+            assert set(classes) == {164, 165, 489}
             box = types.SimpleNamespace(cls=[164], conf=[0.3], xyxy=[np.array([270, 240 - self.h // 2, 370, 240 + self.h // 2])])
             return [types.SimpleNamespace(boxes=[box])]
 
