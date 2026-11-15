@@ -1146,8 +1146,9 @@ while True:
     bg_mask = np.zeros((frame_height, frame_width), dtype=np.uint8)
     bg_mask[0:int(frame_height * 0.45), :] = 255
 
-    camera_speed = 0.0
     camera_dx = 0.0
+    camera_dy = 0.0
+    camera_speed = 0.0
 
     if p0 is not None and len(p0) > 0:
         p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
