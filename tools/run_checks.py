@@ -159,6 +159,13 @@ def main():
     results.append(("unit + regression tests", r.returncode == 0,
                     [] if r.returncode == 0 else tail[-15:], summary + " " + tail[-1]))
 
+    print("== OCR tests (ocr/tests/)")   # optional text reading module, tested on its own
+    r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "ocr/tests", "-t", "."],
+                       cwd=ROOT, capture_output=True, text=True)
+    tail = (r.stderr or r.stdout).strip().splitlines()
+    summary = next((l for l in reversed(tail) if l.startswith("Ran ")), "?")
+    results.append(("OCR tests", r.returncode == 0, [] if r.returncode == 0 else tail[-15:], summary + " " + tail[-1]))
+
     if args.videos:
         n = args.name
         scenarios = [
