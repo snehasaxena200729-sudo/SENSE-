@@ -15,3 +15,7 @@ tempCodeRunnerFile.py
 # Recorded test videos (large binaries)
 *.mp4
 *.mov
+
+# SQLite write-ahead log files
+sense_memory.db-wal
+sense_memory.db-shm
