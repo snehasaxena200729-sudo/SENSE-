@@ -475,12 +475,29 @@ def answer_voice_query(user_text):
         for name, data in live_memory.items():
             if current_time - data["last_seen"] <= 2.5:
                 active_items.append(f"{name} {data['last_zone']}, {data['dist_phrase']}")
+        if scene_hazards is not None:   # doors / stairs from the second model
+            for hz_name, hz_angle in scene_hazards.visible(current_time).items():
+                active_items.append(f"a {hz_name} {spatial.direction_phrase(hz_angle)}")
 
         if not active_items:
             speak("I do not see any familiar objects or people right now.")
         else:
             speak("Currently, I see " + " and ".join(active_items) + ".")
         return
+
+    # Doors / stairs: "where is the door?"
+    if scene_hazards is not None and intent == "WHERE":
+        for hz_name in scene_hazards.HAZARD_NAMES:
+            if hz_name in user_text or (hz_name == "stairs" and "stair" in user_text):
+                d = scene_hazards.seen.get(hz_name)
+                if d and current_time - d["time"] <= scene_hazards.VISIBLE_S:
+                    speak(f"There is a {hz_name} {spatial.direction_phrase(d['angle'])}.")
+                elif d:
+                    speak(f"I saw a {hz_name} {answers.format_time_ago(current_time - d['time'])}, "
+                          f"but I can't see it right now.")
+                else:
+                    speak(f"I haven't seen a {hz_name} yet.")
+                return
 
     # Roadmap E6: memory conversations
     if intent == "CHANGES":
@@ -941,8 +958,8 @@ while True:
     if ttc is not None:
         notifier.push(P1, "looming", "Stop. Something is right in front of you")
     if scene_hazards is not None:
-        for hz_name, hz_text in scene_hazards.update(frame, frame_count, current_time):
-            notifier.push(P1, "scene:" + hz_name, hz_text)
+        for hz_key, hz_text in scene_hazards.update(frame, frame_count, current_time):
+            notifier.push(P1, hz_key, hz_text)
     is_camera_moving = camera_speed > 3.0
     if is_camera_moving:
         last_camera_move_time = current_time

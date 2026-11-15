@@ -140,8 +140,10 @@ class SceneHazardDetector:
     """
     HAZARD_NAMES = ("door", "stairs")
     EVERY_N = 5
-    IMG_SIZE = 480
-    MIN_CONF = 0.35
+    IMG_SIZE = 640          # field test 3: 480 px missed doors; the model was trained at 640
+    MIN_CONF = 0.25         # field test 3: doors score low with the nano model
+    ANNOUNCE_AGAIN_S = 10.0 # say "door ahead" again only after it was out of view this long
+    VISIBLE_S = 2.5         # how long a sighting counts as "visible now"
 
     def __init__(self, model):
         self.model = model
@@ -149,9 +151,15 @@ class SceneHazardDetector:
         self.approach = ApproachTracker()
         self.approach.WINDOW_S = 1.2   # we only sample every EVERY_N frames
         self.boxes = []          # last result, for the HUD: (name, x1, y1, x2, y2)
+        self.seen = {}           # name -> dict(time, angle, frac, conf, first)
+        self._last_log = 0.0
+
+    def visible(self, now):
+        """{name: angle} for doors/stairs seen in the last VISIBLE_S seconds."""
+        return {n: d["angle"] for n, d in self.seen.items() if now - d["time"] <= self.VISIBLE_S}
 
     def update(self, frame, frame_count, now):
-        """Returns a list of warning sentences (usually empty)."""
+        """Returns a list of (key, text) warnings (usually empty)."""
         if not self.class_ids or frame_count % self.EVERY_N:
             return []
         res = self.model.predict(frame, classes=list(self.class_ids), conf=self.MIN_CONF,
@@ -163,14 +171,26 @@ class SceneHazardDetector:
             if name is None:
                 continue
             x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
+            conf = float(box.conf[0]) if getattr(box, "conf", None) is not None else 0.0
             self.boxes.append((name, x1, y1, x2, y2))
             angle = spatial.pixel_to_angle((x1 + x2) / 2, frame_w)
             # per class keep the box closest to straight ahead
             if name not in best or abs(angle) < abs(best[name][1]):
-                best[name] = (y2 - y1, angle)
+                best[name] = (y2 - y1, angle, conf)
         alerts = []
-        for name, (box_h, angle) in best.items():
+        for name, (box_h, angle, conf) in best.items():
+            prev = self.seen.get(name)
+            frac = box_h / float(frame_h)
+            if prev is None or now - prev["time"] > self.ANNOUNCE_AGAIN_S:
+                # newly in view: tell the user once, with its direction
+                alerts.append(("new:" + name, f"{name.capitalize()} {spatial.direction_phrase(angle)}"
+                               + (", very close" if frac > 0.7 else "")))
+            self.seen[name] = {"time": now, "angle": angle, "frac": frac, "conf": conf}
             if self.approach.update("scene:" + name, now, box_h, frame_h, angle):
-                alerts.append((name, f"Careful, {name} right in front of you"))
+                alerts.append(("scene:" + name, f"Careful, {name} right in front of you"))
+        if best and now - self._last_log >= 1.0:   # diagnostics, at most once a second
+            self._last_log = now
+            print("🚪 Seen: " + ", ".join(f"{n} conf {c:.2f}, {h / frame_h:.0%} of view, {a:+.0f} deg"
+                                         for n, (h, a, c) in best.items()))
         self.approach.prune(now)
         return alerts
