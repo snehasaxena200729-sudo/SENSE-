@@ -16,7 +16,8 @@ python sense_master.py            # webcam 0
 python sense_master.py --source clip.mp4   # replay a recorded video (repeatable tests)
 ```
 
-Press **space** to talk and **q** to quit.
+Press **space** to talk and **q** to quit. SENSE says "Listening" and beeps; start speaking after
+the beep. You have about 7 seconds to start and 8 seconds to speak.
 
 The first run needs internet once, to download the Whisper `tiny` model (and `lap` if it's
 missing). After that SENSE works fully offline.
@@ -33,13 +34,17 @@ missing). After that SENSE works fully offline.
 | "Who was here today?" | Lists known people seen today |
 | "What did you see?" | Lists things seen in the last 10 minutes that are not visible now |
 | "This is Sneha" / "This is my water bottle" | Teaches a person or a personal item |
+| "Rename my bottle to my medicine" / "Change my bottle to medicine" | Renames a taught item or person; it keeps its look, place and history |
 | "Forget my bottle" / "Forget Sneha" | Deletes the profile, memory and history (privacy) |
 | "Be quiet" / "Normal mode" / "Talk more" | Changes the alert level (saved between runs) |
 | "Speak slower" / "Speak faster" | Changes the speech rate (saved between runs) |
 
 SENSE also speaks **on its own**:
 
-- **Always:** a warning when a person or obstacle is ahead and getting closer.
+- **Always:** a warning when something is ahead and getting closer fast. Two checks run on every
+  frame: any object YOLO knows growing quickly in the middle of the view, and a camera-only
+  "looming" check (`hazards.py`) that works even for things YOLO has no name for, such as walls,
+  doors or boxes, by measuring how fast the image expands (time to contact).
 - **Normal mode:** your named items moving or disappearing, and known people arriving or leaving.
 - **"Talk more" mode:** every change it notices.
 
@@ -53,6 +58,7 @@ SENSE also speaks **on its own**:
 | `notifier.py` | **What to say, and when:** priorities, cooldowns, no talking over itself, quiet/normal/verbose |
 | `spatial.py` | **World-anchored directions** (stored angle + heading), turn instructions, nearby-object relations |
 | `answers.py` | **Intents, fuzzy name matching, confidence scoring** (confirmed / likely / uncertain) and wording |
+| `hazards.py` | **Sudden-obstacle warnings:** time-to-contact from optical-flow divergence (any textured object) and box-growth checks for every YOLO class |
 | `memory_db.py` | SQLite tables: `environmental_memory` (latest state), `events` (history), `entities`, people and personal-item profiles, `settings` |
 | `tests/` | Unit tests: `python -m unittest discover -s tests -v` |
 
@@ -75,6 +81,7 @@ internally (PyTorch, OpenCV, PortAudio) are not managed by the app.
   directions are only given for things seen in the current run.
 - Distance is a rough single-camera estimate.
 - Two identical objects (same class and colour) that are never seen together may be treated as one.
-- Obstacle warnings only cover classes YOLO knows (chairs, tables, people, ...), not stairs, doors or
-  glass. They are an aid, not a safety guarantee.
+- Obstacle warnings need some texture or a known object: blank walls, glass and stairs going down
+  can be missed, and sudden lighting changes can cause a false warning. They are an aid, not a
+  safety guarantee.
 - People are recognised by clothing colour, which is not reliable across days.

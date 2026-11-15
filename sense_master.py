@@ -7,6 +7,7 @@ import subprocess
 import threading
 import queue
 import argparse
+import os
 from collections import defaultdict, Counter
 import speech_recognition as sr
 from ultralytics import YOLO
@@ -16,6 +17,7 @@ import answers
 from identity import EntityResolver
 from events import EventTracker
 from notifier import Notifier, P1, P2, P3
+from hazards import LoomingDetector, ApproachTracker
 
 # =====================================================================
 # 1. INITIALIZATION & SETUP
@@ -63,6 +65,20 @@ last_db_write = {}                                       # E2 throttle: name -> 
 DB_WRITE_INTERVAL_S = 1.0
 hazard_history = defaultdict(list)                       # O1: tid -> [(time, box height)]
 last_changes_query = None                                # E6 "what changed" bookmark
+looming = LoomingDetector()                              # sudden obstacles, any object
+approach = ApproachTracker()                             # fast-growing YOLO boxes, any class
+last_frame_time = None
+track_conf = {}                                          # tid -> smoothed detector confidence
+
+# Field-test fix: random things were called "phone". A detection now has to be
+# confident ON AVERAGE (exponential moving average per track) and consistent
+# for several frames before SENSE believes it. Small items are confused most.
+MIN_CONFIDENCE = {"phone": 0.55, "remote": 0.55, "mouse": 0.55, "cup": 0.50,
+                  "bottle": 0.45, "book": 0.50, "laptop": 0.50, "person": 0.50}
+DEFAULT_MIN_CONFIDENCE = 0.50
+CONF_SMOOTHING = 0.3            # EMA weight of the newest frame
+MIN_FRAMES_TO_CONFIRM = 4       # was 2
+MIN_CLASS_SHARE = 0.6           # winning class must have 60% of the votes
 try:
     speech_rate = int(memory_db.get_setting("speech_rate", "190"))   # O2 preference
 except ValueError:
@@ -419,6 +435,11 @@ def answer_voice_query(user_text):
             learn_person(extracted.capitalize())
         return
 
+    # Field test: "rename my bottle to medicine" keeps the learned look + history
+    if intent == "RENAME":
+        rename_command(user_text)
+        return
+
     # Roadmap E6 / O2: privacy and preference commands
     if intent == "FORGET":
         forget_command(user_text)
@@ -479,7 +500,7 @@ def answer_voice_query(user_text):
         for m in live_matches:
             d = live_memory[m]
             rel = live_relation(m)
-            announcements.append(f"{m} {d['last_zone']}, {d['dist_phrase']}" + (f", {rel}" if rel else ""))
+            announcements.append(f"{spoken_name(m)} {d['last_zone']}, {d['dist_phrase']}" + (f", {rel}" if rel else ""))
         prefix = "Right now, I see " if intent == "WHEN" else "I see "
         speak(prefix + " and ".join(announcements) + ".")
         return
@@ -638,6 +659,49 @@ def answer_previous(found_target, current_time):
         speak(f"I have no history for {found_target}.")
 
 
+def rename_command(user_text):
+    """'rename my bottle to my medicine' / 'change my bottle to medicine'.
+
+    The object keeps its colour fingerprint, last position and event history;
+    only the name changes, in SQLite and in every in-memory table."""
+    parsed = answers.parse_rename(user_text)
+    if not parsed:
+        speak("Say it like this: rename my bottle to my medicine.")
+        return
+    old_words, new_name = parsed
+    candidates = set(known_objects.keys()) | {p.lower() for p in known_people} | set(memory_db.get_all_memory_names())
+    old = answers.fuzzy_find(old_words, sorted(candidates))
+    if not old:
+        speak(f"I don't know anything called {old_words}. You can point the camera at it and say: this is my {new_name.replace('my ', '', 1)}.")
+        return
+    old = old.lower()
+    if old.startswith("my ") and not new_name.startswith("my "):
+        new_name = "my " + new_name
+    if new_name == old:
+        speak(f"It is already called {spoken_name(old)}.")
+        return
+    memory_db.rename(old, new_name)
+    if old in known_objects:
+        known_objects[new_name] = known_objects.pop(old)
+    for k in list(known_people):
+        if k.lower() == old:
+            known_people[new_name.title()] = known_people.pop(k)
+    for tid, n in list(track_locked_identities.items()):
+        if n.lower() == old:
+            track_locked_identities[tid] = new_name.title()
+    for k in list(live_memory):
+        if k.lower() == old:
+            live_memory[new_name.title()] = live_memory.pop(k)
+    for k in list(event_tracker.items):
+        if k.lower() == old:
+            event_tracker.items[new_name.title()] = event_tracker.items.pop(k)
+    for ent in resolver.entities.values():
+        if (ent.get("name") or "").lower() == old:
+            ent["name"] = new_name
+    print(f"✏️ Renamed '{old}' -> '{new_name}'")
+    speak(f"Okay. {spoken_name(old)[0].upper() + spoken_name(old)[1:]} is now called {spoken_name(new_name)}.")
+
+
 def forget_command(user_text):
     """Privacy: 'forget Sneha' / 'forget my bottle' deletes profile, memory and history."""
     candidates = set(known_objects.keys()) | {p.lower() for p in known_people} | set(memory_db.get_all_memory_names())
@@ -696,7 +760,7 @@ def handle_event(ev):
             text = f"{label} is no longer {where}"
         elif kind == "APPEARED":
             text = f"I see {spoken_name(name)} {where}"
-    if text:
+    if text and not ev.get("brief"):
         notifier.push(P2 if is_personal else P3, lower, text)
 
 
@@ -725,24 +789,44 @@ def check_hazard(tid, display_name, category, box_h, dist_feet, center_x, frame_
         notifier.push(P1, f"hazard:{tid}", text)
 
 
+EARCON = "/System/Library/Sounds/Tink.aiff"   # short macOS sound: "speak now"
+WHISPER_JUNK = {"", "listening", "you", "thank you", "thanks for watching", "bye"}
+
 def listen_in_background():
+    """Listener thread: prompt, record, transcribe. Never answers (main thread does).
+
+    Field-test fix (voice window closed after ~1 s): the old code started the
+    microphone 0.7 s after starting to say "Listening.", so the mic heard SENSE's
+    own voice, treated it as the question and stopped. Now we WAIT for the
+    prompt to finish, play a short beep, calibrate to the room's noise, and give
+    the user up to 7 s to start and 8 s to speak.
+    """
     global is_listening
     is_listening = True
-    speak("Listening.")
-    time.sleep(0.7)
-    
     try:
+        subprocess.run(["killall", "say"], stderr=subprocess.DEVNULL)
+        subprocess.run(["say", "-r", str(speech_rate), "Listening."], timeout=5)  # blocks until spoken
+        if os.path.exists(EARCON):
+            subprocess.run(["afplay", EARCON], timeout=2, stderr=subprocess.DEVNULL)
         with sr.Microphone() as source:
             print("\n🎙️ Listening now... (Say: 'This is my water bottle' or 'Where is the bottle?')")
-            audio = recognizer.listen(source, timeout=4.5, phrase_time_limit=5.0)
-            text = recognizer.recognize_whisper(
-                audio, 
-                model="tiny", 
-                initial_prompt="Sneha, Mummy, water bottle, medicine bottle, phone, laptop."
-            )
-            print(f"👂 Heard: '{text.strip()}'")
+            recognizer.adjust_for_ambient_noise(source, duration=0.4)
+            recognizer.energy_threshold = max(recognizer.energy_threshold, 300)
+            audio = recognizer.listen(source, timeout=7.0, phrase_time_limit=8.0)
+        # Microphone is released before the (slower) transcription
+        text = recognizer.recognize_whisper(
+            audio,
+            model="tiny",
+            initial_prompt="Sneha, Mummy, water bottle, medicine bottle, phone, laptop, rename, forget."
+        ).strip()
+        print(f"👂 Heard: '{text}'")
+        if text.lower().strip(" .!?,") in WHISPER_JUNK:
+            voice_queue.put(("error", "I didn't hear a question. Press space and speak after the beep."))
+        else:
             # Do NOT answer here: hand the text to the main thread.
-            voice_queue.put(("text", text.strip()))
+            voice_queue.put(("text", text))
+    except sr.WaitTimeoutError:
+        voice_queue.put(("error", "I didn't hear anything. Press space and speak after the beep."))
     except Exception as e:
         print(f"Ear note: {e}")
         voice_queue.put(("error", "Sorry, I had trouble hearing that."))
@@ -830,6 +914,13 @@ while True:
         p0 = cv2.goodFeaturesToTrack(frame_gray, mask=bg_mask, **feature_params)
 
     old_gray = frame_gray.copy()
+
+    # Sudden obstacle, any kind (wall, door, box, hand): optical-flow looming
+    frame_dt = (current_time - last_frame_time) if last_frame_time else 0.0
+    last_frame_time = current_time
+    ttc = looming.update(frame_gray, frame_dt)
+    if ttc is not None:
+        notifier.push(P1, "looming", "Stop. Something is right in front of you")
     is_camera_moving = camera_speed > 3.0
     if is_camera_moving:
         last_camera_move_time = current_time
@@ -859,6 +950,17 @@ while True:
             raw_name = model.names[int(box.cls[0])]
             track_id = int(box.id[0])
             conf = float(box.conf[0])
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            center_x = int((x1 + x2) / 2)
+            center_y = int((y1 + y2) / 2)
+
+            # Sudden-obstacle check for ANY of YOLO's 80 classes (not just the
+            # whitelist), on fresh detections only, even while walking.
+            if should_run_yolo and conf >= 0.35 and approach.update(
+                    track_id, current_time, y2 - y1, frame_height,
+                    spatial.pixel_to_angle(center_x, frame_width)):
+                what = "someone" if raw_name == "person" else f"a {raw_name}"
+                notifier.push(P1, f"approach:{track_id}", f"Careful, {what} right in front of you")
 
             if raw_name == "person":
                 entity_name = "person"
@@ -867,9 +969,12 @@ while True:
             else:
                 continue
 
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            center_x = int((x1 + x2) / 2)
-            center_y = int((y1 + y2) / 2)
+            # Smoothed confidence per track; drop tracks that are not convincing
+            if should_run_yolo:
+                prev_conf = track_conf.get(track_id, conf)
+                track_conf[track_id] = (1 - CONF_SMOOTHING) * prev_conf + CONF_SMOOTHING * conf
+            if track_conf.get(track_id, conf) < MIN_CONFIDENCE.get(entity_name, DEFAULT_MIN_CONFIDENCE):
+                continue
 
             candidates.append({
                 "track_id": track_id,
@@ -903,9 +1008,9 @@ while True:
         if len(track_votes[tid]) > 15:
             track_votes[tid].pop(0)
 
-        # Instant lock-on within 2 frames!
-        if len(track_votes[tid]) >= 2:
-            winner_name, _ = Counter(track_votes[tid]).most_common(1)[0]
+        # Lock-on needs a few consistent frames (field-test fix: fewer random "phones")
+        winner_name, winner_votes = Counter(track_votes[tid]).most_common(1)[0]
+        if len(track_votes[tid]) >= MIN_FRAMES_TO_CONFIRM and winner_votes / len(track_votes[tid]) >= MIN_CLASS_SHARE:
             entity_settled = True   # becomes False while a new object's colour is still being voted
             x1, y1, x2, y2 = cand["box"]
             x1, y1 = max(0, x1), max(0, y1)
@@ -1004,11 +1109,6 @@ while True:
 
             dist_phrase = format_distance(dist_feet)
 
-            # Roadmap O1: obstacle / approach warning. Runs on fresh YOLO frames
-            # even while the camera moves (the user may be walking).
-            if should_run_yolo and (winner_name in HAZARD_NAMES or winner_name == "person"):
-                check_hazard(tid, display_name, winner_name, h_px, dist_feet, center_x, frame_width, current_time)
-
             # Update Live Memory (Roadmap E4: every observation gets a WORLD angle)
             if camera_is_stable:
                 is_trackable = display_name not in ["Unfamiliar Person", "Person"] and entity_settled
@@ -1087,7 +1187,10 @@ while True:
         del hazard_history[old_tid]
 
     # Roadmap E3: speak at most one (merged) announcement, only if it matters
-    notifier.tick(camera_moving=is_camera_moving)
+    notifier.tick(camera_moving=is_camera_moving, hold=is_listening)
+    approach.prune(current_time)
+    for old_tid in [t for t in track_conf if t not in track_votes]:
+        del track_conf[old_tid]
 
     # -------------------------------------------------------------
     # SUB-SYSTEM E: HEADS-UP DISPLAY (HUD)

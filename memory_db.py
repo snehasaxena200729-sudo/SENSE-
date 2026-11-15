@@ -376,3 +376,25 @@ def forget(name):
     removed += conn.execute("DELETE FROM events WHERE name = ?", (n,)).rowcount
     conn.commit()
     return removed
+
+
+# ---- Renaming: "rename my bottle to my medicine" -----------------------------
+def rename(old, new):
+    """Give a person or item a new name everywhere, keeping its profile and history.
+
+    One transaction, so a crash can never leave half the tables renamed.
+    Returns the number of rows changed."""
+    conn = _get_conn()
+    o, n = old.lower(), new.lower()
+    changed = 0
+    with conn:
+        # if the new name already exists, the renamed object replaces it
+        conn.execute("DELETE FROM custom_object_profiles WHERE LOWER(name) = ?", (n,))
+        conn.execute("DELETE FROM environmental_memory WHERE LOWER(object_name) = ?", (n,))
+        changed += conn.execute("UPDATE custom_object_profiles SET name = ? WHERE LOWER(name) = ?", (n, o)).rowcount
+        changed += conn.execute("UPDATE environmental_memory SET object_name = ? WHERE LOWER(object_name) = ?", (n, o)).rowcount
+        changed += conn.execute("UPDATE entities SET name = ? WHERE LOWER(name) = ?", (n, o)).rowcount
+        changed += conn.execute("UPDATE events SET name = ? WHERE LOWER(name) = ?", (new.title(), o)).rowcount
+        conn.execute("DELETE FROM people_profiles WHERE LOWER(name) = ? AND LOWER(name) != ?", (n, o))
+        changed += conn.execute("UPDATE people_profiles SET name = ? WHERE LOWER(name) = ?", (new.title(), o)).rowcount
+    return changed
