@@ -16,6 +16,10 @@ test guide).
   approach_door.mp4  walk towards a door
   find_item.mp4      see the objects, turn away, turn back, walk up ("find the ...")
   people.mp4         person A, empty room, person A (another photo), others
+  scene_change.mp4   a still room: 10 s as it is, 20 s with one object moved
+                     sideways, 20 s with that object gone ("what changed since I left?")
+  scene_before.mp4 / scene_after.mp4   the same room in two separate runs
+                     (before / object moved), to test answers across a restart
 
 Suggested photos: any photo with a bicycle/chair/dog in it (e.g. the classic
 darknet 'dog.jpg'), any photo of a door, two different photos of one person
@@ -124,6 +128,71 @@ def people_clip(out, a1, a2, others):
     print(out, n, "frames")
 
 
+MOVABLE = {"dog", "cat", "bottle", "cup", "chair", "laptop", "book", "potted plant", "suitcase",
+           "remote", "cell phone", "mouse", "bicycle", "bench"}
+
+
+def scene_change_clips(img_path, out_dir, seed=0):
+    """Three phases of one still room (sway + noise only): as photographed,
+    one object moved sideways, that object removed. The object is the most
+    confident movable detection (yolov8n.pt); its old place is filled with
+    cv2.inpaint, which is crude but leaves nothing YOLO calls that object."""
+    from ultralytics import YOLO
+    img = cv2.imread(img_path)
+    if img is None:
+        raise SystemExit(f"cannot read {img_path}")
+    res = YOLO(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "yolov8n.pt"))(
+        img, verbose=False)[0]
+    cands = [(float(c), res.names[int(k)], [int(v) for v in b])
+             for b, k, c in zip(res.boxes.xyxy, res.boxes.cls, res.boxes.conf) if res.names[int(k)] in MOVABLE]
+    if not cands:
+        raise SystemExit("no movable object (dog, chair, bottle, ...) found in the photo")
+    conf, cls, (x1, y1, x2, y2) = max(cands)
+    h, w = img.shape[:2]
+    # GrabCut (built into OpenCV) separates the object from its background
+    # inside the box, so only the object is moved - not the bits of other
+    # objects behind it, which YOLO would report as new things
+    gc = np.zeros((h, w), np.uint8)
+    bgd, fgd = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
+    cv2.grabCut(img, gc, (x1, y1, x2 - x1, y2 - y1), bgd, fgd, 5, cv2.GC_INIT_WITH_RECT)
+    fg = np.isin(gc, (cv2.GC_FGD, cv2.GC_PR_FGD)).astype(np.uint8) * 255
+    hole = cv2.dilate(fg, np.ones((15, 15), np.uint8))
+    removed = cv2.inpaint(img, hole, 9, cv2.INPAINT_TELEA)
+    bw = x2 - x1
+    nx = x1 + int(0.55 * w) if x1 + int(0.55 * w) + bw <= w else x1 - int(0.55 * w)
+    nx = int(np.clip(nx, 0, w - bw))
+    moved = removed.copy()
+    m = cv2.GaussianBlur(fg[y1:y2, x1:x2], (7, 7), 0)[..., None] / 255.0
+    moved[y1:y2, nx:nx + bw] = (img[y1:y2, x1:x2] * m + moved[y1:y2, nx:nx + bw] * (1 - m)).astype(np.uint8)
+    print(f"moving the {cls} ({conf:.2f}) from x={x1} to x={nx} of {w}")
+
+    def fit(im):
+        s = W / im.shape[1]
+        im = cv2.resize(im, (W, int(im.shape[0] * s)))
+        y = max(0, (im.shape[0] - H) // 2)
+        c = np.full((H, W, 3), 90, np.uint8)
+        part = im[y:y + H]
+        c[:part.shape[0]] = part
+        return c
+
+    def write(path, segs):
+        vw, rng, n = _writer(path), np.random.default_rng(seed), 0
+        for base, k in segs:
+            for i in range(k):
+                M = np.float32([[1, 0, 3 * np.sin(i / 5)], [0, 1, 2 * np.cos(i / 7)]])
+                f = cv2.warpAffine(base, M, (W, H), borderMode=cv2.BORDER_REPLICATE)
+                vw.write(np.clip(f + rng.normal(0, 3, f.shape), 0, 255).astype(np.uint8))
+            n += k
+        vw.release()
+        print(path, n, "frames")
+
+    a, b, c = fit(img), fit(moved), fit(removed)
+    write(os.path.join(out_dir, "scene_change.mp4"), [(a, 150), (b, 300), (c, 300)])
+    write(os.path.join(out_dir, "scene_before.mp4"), [(a, 150)])
+    write(os.path.join(out_dir, "scene_after.mp4"), [(b, 180)])
+    return cls
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("out")
@@ -138,6 +207,7 @@ def main():
         zoom_clip(a.objects, j("approach_far.mp4"), 0.45, 0.5, 0.5, 2.2, 6, 3)
         zoom_clip(a.objects, j("still_near.mp4"), 0.45, 0.5, 1.4, 1.4, 0.1, 8)
         zoom_clip(a.objects, j("pan_near.mp4"), 0.45, 0.5, 1.3, 1.3, 0.1, 8, pan=0.8)
+        scene_change_clips(a.objects, a.out)
         find_clip(a.objects, j("find_item.mp4"), 0.45, 0.5)
     if a.door:
         zoom_clip(a.door, j("approach_door.mp4"), 0.5, 0.5, 0.6, 3.0, 7, 3)

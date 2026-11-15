@@ -101,6 +101,40 @@ def check_find(run):
     return errs
 
 
+def check_scene_change(run):
+    """'I'm leaving' ... dog moved ... 'what changed since I left' ... dog removed ... 'what changed'."""
+    errs = no_errors(run)
+    mark = answer_to(run, "i'm leaving") or ""
+    if not re.search(r"^Okay, I remembered 2 things: .*dog.*bicycle|^Okay, I remembered 2 things: .*bicycle.*dog", mark):
+        errs.append(f"snapshot should hold the dog and the bicycle: {mark!r}")
+    first = answer_to(run, "what changed since i left") or ""
+    if not re.search(r"dog was moved from on your left to on your right", first):
+        errs.append(f"the dog's move was not reported: {first!r}")
+    second = answer_to(run, "what changed") or ""
+    if not re.search(r"dog is no longer where it was", second):
+        errs.append(f"the removed dog was not reported: {second!r}")
+    for a in (first, second):
+        if "New:" in a or "bicycle was moved" in a or "bicycle is no longer" in a:
+            errs.append(f"false change reported: {a!r}")
+        if re.search(r"(dog|bicycle) \d", a):
+            errs.append(f"internal identity number spoken: {a!r}")
+    return errs
+
+
+def check_scene_restart(run):
+    """Restart between 'before' and 'after' with only 2 objects (one moved): the
+    camera rotation can't be verified, so SENSE must not claim moves - and say why."""
+    errs = no_errors(run)
+    a = answer_to(run, "what changed since i left") or ""
+    if not a.startswith("Since I last ran"):
+        errs.append(f"previous run's snapshot not used: {a!r}")
+    if "can't tell if anything was moved" not in a:
+        errs.append(f"should explain it can't verify moves across the restart: {a!r}")
+    if re.search(r"was moved from|no longer where|New:", a):
+        errs.append(f"claimed a change it cannot know: {a!r}")
+    return errs
+
+
 def check_people(name, legacy):
     def check(run):
         errs = no_errors(run)
@@ -130,10 +164,10 @@ def check_people(name, legacy):
     return check
 
 
-def run_clip(path, frames, questions, tag):
+def run_clip(path, frames, questions, tag, db=None):
     out = os.path.join(tempfile.gettempdir(), f"sense_check_{tag}.json")
     cmd = [sys.executable, os.path.join(ROOT, "tools", "smoke_run.py"), path, str(frames),
-           *questions, "--json", out]
+           *questions, "--json", out] + (["--db", db] if db else [])
     t0 = time.time()
     subprocess.run(cmd, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800)
     with open(out) as f:
@@ -172,6 +206,11 @@ def main():
               f"where is {n.lower()}@205", "who was here today@265"]
              + ([f"where is {args.legacy.lower()}@300"] if args.legacy else []),
              check_people(n, args.legacy)),
+            ("what changed since I left: moved, then removed", "scene_change.mp4", 750,
+             ["i'm leaving@120", "what changed since i left@420", "i'm leaving@435", "what changed@735"],
+             check_scene_change),
+            ("what changed since I left, across a restart", "scene_after.mp4", 180,
+             ["what changed since i left@170"], check_scene_restart),
         ]
         for title, clip, frames, qs, check in scenarios:
             path = os.path.join(args.videos, clip)
@@ -179,7 +218,12 @@ def main():
                 results.append((title, None, [f"skipped: {clip} not found"], ""))
                 continue
             print(f"== Scenario: {title} ({clip})")
-            run = run_clip(path, frames, qs, clip.split(".")[0])
+            db = None
+            if clip == "scene_after.mp4":
+                # two runs sharing one memory database: 'before' first, then 'after'
+                db = os.path.join(tempfile.mkdtemp(), "sense_memory.db")
+                run_clip(os.path.join(args.videos, "scene_before.mp4"), 150, [], "scene_before", db=db)
+            run = run_clip(path, frames, qs, clip.split(".")[0], db=db)
             errs = check(run)
             spoken = [f"[{f}] {t}" for f, t in run["spoken"][1:]]
             results.append((title, not errs, errs, f"{run['frames']} frames in {run['took']:.0f} s; said: "

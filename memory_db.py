@@ -113,10 +113,33 @@ def init_database():
             value TEXT
         )
     """)
+    # --- Scene change summary: snapshots of the room ("what changed since I left?") ---
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scene_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL,
+            session_id TEXT,
+            kind TEXT,          -- 'mark' (user said "I'm leaving") or 'auto' (end of a run)
+            heading REAL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS snapshot_items (
+            snapshot_id INTEGER,
+            name TEXT,
+            zone TEXT,
+            world_angle REAL,
+            dist_feet REAL,
+            last_seen REAL,
+            status TEXT         -- 'GONE' = only seen shortly before (flickering / just left)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_snapshot_items ON snapshot_items(snapshot_id)")
     # --- Roadmap E4: world-anchored position for the latest-state table ---
     _add_column_if_missing(cursor, "environmental_memory", "world_angle", "REAL")
     _add_column_if_missing(cursor, "environmental_memory", "session_id", "TEXT")
     _add_column_if_missing(cursor, "environmental_memory", "dist_feet", "REAL")
+    _add_column_if_missing(cursor, "snapshot_items", "status", "TEXT")
 
     # -------------------------------------------------------------
     # SAFELY PURGE GHOSTS (Zero constraint conflicts!)
@@ -384,6 +407,7 @@ def forget(name):
     removed += conn.execute("DELETE FROM environmental_memory WHERE object_name = ?", (n,)).rowcount
     removed += conn.execute("DELETE FROM entities WHERE LOWER(name) = ?", (n,)).rowcount
     removed += conn.execute("DELETE FROM events WHERE name = ?", (n,)).rowcount
+    removed += conn.execute("DELETE FROM snapshot_items WHERE LOWER(name) = ?", (n,)).rowcount
     conn.commit()
     return removed
 
@@ -405,6 +429,8 @@ def rename(old, new):
         changed += conn.execute("UPDATE environmental_memory SET object_name = ? WHERE LOWER(object_name) = ?", (n, o)).rowcount
         changed += conn.execute("UPDATE entities SET name = ? WHERE LOWER(name) = ?", (n, o)).rowcount
         changed += conn.execute("UPDATE events SET name = ? WHERE LOWER(name) = ?", (new.title(), o)).rowcount
+        conn.execute("DELETE FROM snapshot_items WHERE LOWER(name) = ?", (n,))
+        changed += conn.execute("UPDATE snapshot_items SET name = ? WHERE LOWER(name) = ?", (n, o)).rowcount
         conn.execute("DELETE FROM people_profiles WHERE LOWER(name) = ? AND LOWER(name) != ?", (n, o))
         changed += conn.execute("UPDATE people_profiles SET name = ? WHERE LOWER(name) = ?", (new.title(), o)).rowcount
         conn.execute("DELETE FROM face_profiles WHERE LOWER(name) = ? AND LOWER(name) != ?", (n, o))
@@ -434,3 +460,57 @@ def load_face_profiles():
         d["embeddings"] = np.vstack(d["embeddings"])
     return out
 
+
+
+# ---- Scene change summary: room snapshots ---------------------------------
+MAX_SNAPSHOTS = 20
+
+
+def save_snapshot(ts, session_id, kind, heading, items):
+    """Store a snapshot of the room. items: [{name, zone, world_angle, dist_feet, last_seen}].
+
+    An 'auto' snapshot is kept once per run (replaced each time), a 'mark' is
+    added every time the user says "I'm leaving". Only the newest
+    MAX_SNAPSHOTS are kept. Returns the snapshot id.
+    """
+    conn = _get_conn()
+    with conn:
+        if kind == "auto":
+            old = [r[0] for r in conn.execute(
+                "SELECT id FROM scene_snapshots WHERE kind = 'auto' AND session_id = ?", (session_id,))]
+            for sid in old:
+                conn.execute("DELETE FROM snapshot_items WHERE snapshot_id = ?", (sid,))
+                conn.execute("DELETE FROM scene_snapshots WHERE id = ?", (sid,))
+        cur = conn.execute("INSERT INTO scene_snapshots (ts, session_id, kind, heading) VALUES (?, ?, ?, ?)",
+                           (float(ts), session_id, kind, _num(heading)))
+        sid = cur.lastrowid
+        conn.executemany(
+            "INSERT INTO snapshot_items (snapshot_id, name, zone, world_angle, dist_feet, last_seen, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(sid, it["name"].lower(), it.get("zone"), _num(it.get("world_angle")),
+              _num(it.get("dist_feet")), _num(it.get("last_seen")), it.get("status")) for it in items])
+        stale = [r[0] for r in conn.execute(
+            "SELECT id FROM scene_snapshots ORDER BY ts DESC LIMIT -1 OFFSET ?", (MAX_SNAPSHOTS,))]
+        for old_id in stale:
+            conn.execute("DELETE FROM snapshot_items WHERE snapshot_id = ?", (old_id,))
+            conn.execute("DELETE FROM scene_snapshots WHERE id = ?", (old_id,))
+    return sid
+
+
+def list_snapshots():
+    """Newest first: [{id, ts, session_id, kind, heading}]"""
+    rows = _get_conn().execute(
+        "SELECT id, ts, session_id, kind, heading FROM scene_snapshots ORDER BY ts DESC").fetchall()
+    return [dict(zip(["id", "ts", "session_id", "kind", "heading"], r)) for r in rows]
+
+
+def get_snapshot_items(snapshot_id):
+    rows = _get_conn().execute(
+        "SELECT name, zone, world_angle, dist_feet, last_seen, status FROM snapshot_items WHERE snapshot_id = ?",
+        (snapshot_id,)).fetchall()
+    return [dict(zip(["name", "zone", "world_angle", "dist_feet", "last_seen", "status"], r)) for r in rows]
+
+
+def get_all_memories():
+    cur = _get_conn().execute(f"SELECT {_MEMORY_COLS} FROM environmental_memory")
+    return [_memory_row_to_dict(r) for r in cur.fetchall()]

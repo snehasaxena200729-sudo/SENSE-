@@ -93,6 +93,30 @@ Notes: "within reach" depends on the distance estimate, which is coarse until yo
 know (e.g. a person far away who is cut off by the frame) can be guided to but may never get "within
 reach"; guidance then ends after 2 minutes.
 
+## 4c. "What changed since I left?"
+
+You need a table with 3 or 4 things SENSE knows (bottle, cup, phone, laptop, book, a chair nearby)
+and the laptop on the table **not moving** (its camera pointing at the things). Keep the terminal
+visible: the comparison is printed as `🔁 Scene diff vs snapshot …` with every bucket (moved / same /
+gone / unchecked / appeared).
+
+| Step | Expected |
+| --- | --- |
+| S1 Start SENSE, let it look at the table for 10 s. Press space, say "I'm leaving" | "Okay, I remembered N things: …" naming what is on the table (the number matches what is there). Terminal: `🧭 Intent: MARK` |
+| S2 Without touching anything, wait 30 s, ask "What changed since I left?" | "Since you left 30 seconds ago: Nothing has changed that I can see." No item is called moved, missing or new |
+| S3 Say "I'm leaving". Move the bottle about 40 cm sideways (to the other side of the table, still in view). Step out of view. After 30 s ask "What changed since I left?" | "… your bottle (or the bottle) was moved from … to …", with the sides matching what you did (left/right as seen from the laptop). "Everything else is where it was." |
+| S4 Say "I'm leaving". Take the cup away (out of the room). Wait 30 s, ask "What changed?" (plain) | "… The cup is no longer where it was …". Also: a plain "What changed?" asked right after this uses the snapshot; asking "What changed?" again a minute later goes back to the normal "since you last asked" summary |
+| S5 Say "I'm leaving". Put a new item (a book, a phone) on the table. Wait 30 s, ask "I'm back" | "… New: the book in front of you …" (side matches) |
+| S6 Have someone SENSE knows by face (section 3) walk in front of the camera while you are "away" in S5 | The answer also says "… Sneha was here." Strangers are never named |
+| S7 Say "I'm leaving". Turn the laptop about 90° away from the table and keep it there. Ask "What changed since I left?" | Nothing on the table is called missing: "… I haven't looked where the bottle, the cup and … were yet." Now turn it back to the table, wait 5 s, ask again: a normal answer as in S2 |
+| S8 Restart test: quit SENSE (`q`) with the table in view. Move one item. Start SENSE again, let it look at the table for 10 s, ask "What changed since I left?" | Starts with "Since I last ran, …". With 3 or more unmoved items in view: the moved item is reported as moved. With fewer: "I can't tell if anything was moved, because the camera may have been turned since then" (honest, not a failure) |
+| S9 Ask "What changed in the last 10 minutes?" | A summary of the events in that window (the old "what changed" wording: "N things changed: …") |
+| S10 Fresh database test: rename `sense_memory.db` away, start SENSE, immediately ask "What changed since I left?" | "I don't have a picture of the room from before. Next time, say I'm leaving before you go …". Put the old database back afterwards |
+
+Write down for S3: how far you moved the bottle and whether SENSE noticed. Very small moves (under
+about 12° of the view, roughly 20 cm at 1 m) are deliberately ignored, and moves straight towards or
+away from the camera are not detected at all.
+
 ## 5. Distance calibration (optional, recommended)
 
 ```bash
@@ -118,4 +142,4 @@ Leave SENSE running for 30 minutes in a room where people come and go.
 ### What to send back
 
 For each section, write pass or fail, with the exact sentence SENSE said and the terminal lines
-around any failure. A short phone video of section 4 helps a lot.
+around any failure (for 4c, the `🔁 Scene diff` line). A short phone video of section 4 helps a lot.

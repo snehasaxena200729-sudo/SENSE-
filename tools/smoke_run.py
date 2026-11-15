@@ -14,6 +14,8 @@ The SQLite memory is a temporary copy, so your real sense_memory.db is untouched
 loop time, and (every N frames) process memory and the size of SENSE's
 internal tables - used by tools/run_checks.py and the stress test.
 --loop restarts the video when it ends (long stress runs from a short clip).
+--db FILE uses (and keeps) this memory database instead of a throw-away copy,
+so two runs can share memory (e.g. "what changed since I left?" across a restart).
 --fast reads frames as fast as possible. By default frames are paced to the
 clip's frame rate, like a camera: SENSE's timing logic (gaps, trends, cooldowns)
 works in seconds, and an unpaced run squeezes a 2 s gap into a fraction of that.
@@ -33,7 +35,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 args = sys.argv[1:]
-opts = {"--json": None, "--stats-every": "0"}
+opts = {"--json": None, "--stats-every": "0", "--db": None}
 flags = {"--loop": False, "--fast": False}
 rest = []
 i = 0
@@ -175,11 +177,14 @@ queue.Queue = _ScriptedQueue
 
 # --- temporary copy of the memory database ----------------------------------
 import memory_db  # noqa: E402
-tmp = tempfile.mkdtemp()
-src_db = os.path.join(ROOT, "sense_memory.db")
-if os.path.exists(src_db):
-    shutil.copy(src_db, os.path.join(tmp, "sense_memory.db"))
-memory_db.DB_PATH = os.path.join(tmp, "sense_memory.db")
+if opts["--db"]:
+    memory_db.DB_PATH = os.path.abspath(opts["--db"])
+else:
+    tmp = tempfile.mkdtemp()
+    src_db = os.path.join(ROOT, "sense_memory.db")
+    if os.path.exists(src_db):
+        shutil.copy(src_db, os.path.join(tmp, "sense_memory.db"))
+    memory_db.DB_PATH = os.path.join(tmp, "sense_memory.db")
 
 os.chdir(ROOT)
 sys.argv = ["sense_master.py", "--source", video]

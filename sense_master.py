@@ -23,6 +23,7 @@ from people import PersonIdentityGate, count_phrase
 from continuity import ObjectContinuity
 from face_id import FaceID, Enrolment, decide as face_decide
 from guidance import FindGuide
+import scene_diff
 
 # =====================================================================
 # 1. INITIALIZATION & SETUP
@@ -154,6 +155,9 @@ track_conf = {}                                          # tid -> smoothed detec
 guide = FindGuide()                                      # "find my bottle" guidance (guidance.py)
 guide_target = None                                      # {"kind": item|person|door|stairs, "name": ...}
 last_guide_seen = (0.0, [])                              # (time, observations) of the last YOLO frame
+view_coverage = scene_diff.ViewCoverage()                # "what changed": which directions were looked at
+last_auto_snapshot = time.time()                         # the room is saved every minute (and on quit)
+AUTO_SNAPSHOT_EVERY_S = 60.0
 
 # Field-test fix: random things were called "phone". A detection now has to be
 # confident ON AVERAGE (exponential moving average per track) and consistent
@@ -529,6 +533,14 @@ def answer_voice_query(user_text):
         start_find(user_text, current_time)
         return
 
+    # Scene change summary (scene_diff.py)
+    if intent == "MARK":
+        mark_scene(current_time)
+        return
+    if intent == "SINCE_LEFT":
+        answer_since_left(current_time)
+        return
+
     # Intent B: Room Overview ("What do you see?") - what is visible right now
     if intent == "OVERVIEW":
         active_items = []
@@ -584,7 +596,13 @@ def answer_voice_query(user_text):
 
     # Roadmap E6: memory conversations
     if intent == "CHANGES":
-        answer_changes(current_time)
+        window = answers.parse_time_window(user_text)
+        if window:                                   # "what changed in the last 10 minutes"
+            answer_changes(current_time, since=current_time - window)
+        elif scene_reference_pending(current_time):  # first "what changed" after "I'm leaving"
+            answer_since_left(current_time)
+        else:
+            answer_changes(current_time)
         return
     if intent == "WHO":
         answer_who(current_time)
@@ -724,12 +742,14 @@ def memory_relation(rec):
     return spatial.relation_phrase(target, spatial.nearest_neighbour(target, others))
 
 
-def answer_changes(current_time):
-    """'What changed?' - events since the last time you asked (max 30 minutes back)."""
+def answer_changes(current_time, since=None):
+    """'What changed?' - events since the last time you asked (max 30 minutes back),
+    or since an explicit time ('in the last 10 minutes')."""
     global last_changes_query
-    since = current_time - 1800
-    if last_changes_query is not None:
-        since = max(since, last_changes_query)
+    if since is None:
+        since = current_time - 1800
+        if last_changes_query is not None:
+            since = max(since, last_changes_query)
     events_list = [ev for ev in memory_db.get_events_since(since)
                    if ev["type"] in ("MOVED", "GONE")
                    or (ev["type"] == "RETURNED" and ev.get("detail"))
@@ -741,6 +761,104 @@ def answer_changes(current_time):
     last_changes_query = current_time
     summary = answers.summarise_changes(events_list)
     speak(summary[0].upper() + summary[1:])
+
+
+# ---------------------------------------------------------------------
+# Scene change summary: "I'm leaving" ... "what changed since I left?"
+# ---------------------------------------------------------------------
+def is_person_name(name):
+    lower = name.lower()
+    return lower in {p.lower() for p in known_people} or lower in LEGACY_PEOPLE or "person" in lower
+
+
+SNAPSHOT_RECENT_GONE_S = 120.0     # flickering items: "seen shortly before" (see scene_diff.compare)
+
+
+def current_scene_items(now):
+    """Everything SENSE believes is in the room now (this run). Items that went
+    GONE in the last two minutes are kept with status GONE: often they are just
+    flickering detections, and they must not be called 'new' when seen again."""
+    out = []
+    for r in memory_db.get_all_memories():
+        if r.get("session_id") != SESSION_ID or is_person_name(r["name"]):
+            continue
+        gone = (r.get("status") or "").upper() == "GONE"
+        if gone and now - r["last_seen"] > SNAPSHOT_RECENT_GONE_S:
+            continue
+        out.append(dict(r, status="GONE" if gone else None))
+    return out
+
+
+def save_scene_snapshot(now, kind):
+    items = current_scene_items(now)
+    if kind == "auto" and not any(i["status"] is None for i in items):
+        return None, items          # an empty run must not replace a useful snapshot
+    return memory_db.save_snapshot(now, SESSION_ID, kind, cumulative_camera_heading, items), items
+
+
+def scene_label(name):
+    return spoken_name(scene_diff.speakable(name))
+
+
+def mark_scene(now):
+    """'I'm leaving' - remember the room as it is now."""
+    _, items = save_scene_snapshot(now, "mark")
+    view_coverage.reset()           # only look-ups AFTER this moment can prove something is gone
+    items = [i for i in items if i["status"] is None]
+    if not items:
+        speak("Okay. I don't see any of your things right now, so when you're back "
+              "I'll tell you what is new.")
+        return
+    names = [scene_label(i["name"]) for i in items]
+    listed = scene_diff._join(scene_diff._cap(names, 4))
+    speak(f"Okay, I remembered {len(items)} thing{'s' if len(items) != 1 else ''}: {listed}. "
+          f"When you're back, ask me what changed.")
+
+
+def _last_scene_answer():
+    try:
+        return float(memory_db.get_setting("scene_answer_ts", "0"))
+    except ValueError:
+        return 0.0
+
+
+def scene_reference_pending(now):
+    """Should a plain 'what changed?' compare with a snapshot? Yes after 'I'm leaving',
+    and in the first 10 minutes of a run (compare with the previous run)."""
+    ref = scene_diff.choose_reference(memory_db.list_snapshots(), SESSION_ID, _last_scene_answer())
+    if ref is None or ref["ts"] <= _last_scene_answer():
+        return False
+    return ref["kind"] == "mark" or now - SESSION_START < 600
+
+
+def answer_since_left(now):
+    global last_changes_query
+    ref = scene_diff.choose_reference(memory_db.list_snapshots(), SESSION_ID, _last_scene_answer())
+    if ref is None:
+        speak("I don't have a picture of the room from before. Next time, say "
+              "I'm leaving before you go, and I will remember the room.")
+        return
+    ref_items, now_rows, offset, positions_known = scene_diff.prepare(
+        ref, memory_db.get_snapshot_items(ref["id"]), memory_db.get_all_memories(),
+        SESSION_ID, is_person_name)
+    diff = scene_diff.compare(ref_items, now_rows, coverage=view_coverage, offset=offset,
+                              offset_estimated=ref["session_id"] != SESSION_ID)
+    # known people (verified by face) who came while the user was away
+    since_enrol = {p.lower(): t for p, t in known_people.items()}
+    visitors = []
+    for ev in memory_db.get_events_since(ref["ts"]):
+        n = ev["name"].lower()
+        if ev["type"] in ("APPEARED", "RETURNED") and n in since_enrol and ev["ts"] >= since_enrol[n]:
+            if spoken_name(n) not in visitors:
+                visitors.append(spoken_name(n))
+    ago = answers.format_time_ago(now - ref["ts"])
+    since_words = f"you left {ago}" if ref["kind"] == "mark" else f"I last ran, {ago}"
+    print(f"🔁 Scene diff vs snapshot {ref['id']} ({ref['kind']}): offset={offset} "
+          + ", ".join(f"{k}={[i['name'] for i in v]}" for k, v in diff.items()))
+    speak(scene_diff.summarise(diff, cumulative_camera_heading, scene_label, since_words,
+                               people=visitors, positions_known=positions_known))
+    memory_db.set_setting("scene_answer_ts", now)
+    last_changes_query = now        # the next plain 'what changed' starts from here
 
 
 def answer_who(current_time):
@@ -1486,6 +1604,15 @@ while True:
                     dist_feet=obs["dist_feet"], seen_at=current_time)
                 last_db_write[name] = current_time
 
+    # "What changed since I left?": which directions got a steady look, and a
+    # snapshot of the room every minute (so a crash or a closed lid still
+    # leaves a 'before' picture for the next run)
+    if camera_is_stable:
+        view_coverage.add(cumulative_camera_heading, frame_dt)
+    if current_time - last_auto_snapshot >= AUTO_SNAPSHOT_EVERY_S:
+        save_scene_snapshot(current_time, "auto")
+        last_auto_snapshot = current_time
+
     # Persist newly named object identities (rare) and free old track buffers
     for eid, ent in resolver.pop_dirty():
         if ent.get("name"):
@@ -1571,6 +1698,8 @@ while True:
     elif key == ord(' '):
         trigger_voice()
 
+# The room as it was when SENSE stopped: the 'before' picture for the next run
+save_scene_snapshot(time.time(), "auto")
 # Save the learned appearance of every named object identity, then close the DB
 for eid, ent in resolver.entities.items():
     if ent.get("name"):
