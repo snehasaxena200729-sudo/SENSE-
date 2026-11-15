@@ -33,15 +33,6 @@ INTENT_PATTERNS = [
                    "never mind", "nevermind", "i found it", "found it", "i've got it", "i have it"]),
     ("FIND",     ["find ", "guide me to", "take me to", "look for", "search for", "locate",
                   "help me get to"]),
-    # Scene change summary (scene_diff.py): "I'm leaving" stores a snapshot of the
-    # room, "what changed since I left?" / "I'm back" compares with it. Checked
-    # before LEARN ("remember ...") and CHANGES ("what changed ...").
-    ("MARK",     ["i'm leaving", "i am leaving", "im leaving", "i'm going out", "i am going out",
-                  "i'll be back", "i will be back", "be right back", "remember the room",
-                  "remember this room", "remember the scene", "remember how the room", "take a snapshot"]),
-    ("SINCE_LEFT", ["since i left", "since i was", "while i was away", "while i was gone",
-                    "while i was out", "i'm back", "i am back", "im back", "since last time",
-                    "since i went"]),
     ("LEARN",    ["this is", "my name is", "remember as", "call this", "call it"]),
     ("QUIET",    ["be quiet", "quiet mode", "stop talking", "silent mode", "fewer alerts"]),
     ("VERBOSE",  ["talk more", "verbose", "tell me everything", "more alerts"]),
@@ -60,7 +51,7 @@ INTENT_PATTERNS = [
 
 
 def classify_intent(text):
-    t = text.lower().replace("\u2019", "'")     # Whisper sometimes writes I’m with a curly quote
+    t = text.lower()
     # "change <something> to <something>" is a rename, never a 'what changed' question
     if t.lstrip().startswith("change ") and " to " in t:
         return "RENAME"
@@ -68,36 +59,6 @@ def classify_intent(text):
         if any(p in t for p in phrases):
             return intent
     return "WHERE"
-
-
-_NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-                 "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "fifteen": 15,
-                 "twenty": 20, "thirty": 30, "forty": 40, "forty-five": 45, "sixty": 60, "few": 3}
-
-
-def parse_time_window(text):
-    """'what changed in the last 10 minutes' -> 600 (seconds); None if no window.
-
-    Whisper writes numbers as digits most of the time, but small numbers and
-    'an hour' / 'a few minutes' come out as words, so both are handled.
-    'half an hour' -> 1800.
-    """
-    t = text.lower().replace("?", " ").replace(",", " ").replace(".", " ")
-    if "half an hour" in t or "half hour" in t:
-        return 1800
-    words = t.split()
-    for i, w in enumerate(words):
-        unit = w.rstrip("s")
-        if unit in ("minute", "min", "hour", "second") and i > 0:
-            prev = words[i - 1]
-            if prev == "few" or (prev in _NUMBER_WORDS) or prev.isdigit():
-                n = int(prev) if prev.isdigit() else _NUMBER_WORDS[prev]
-            elif prev in ("last", "past"):
-                n = 1                       # 'in the last hour'
-            else:
-                continue
-            return n * {"minute": 60, "min": 60, "hour": 3600, "second": 1}[unit]
-    return None
 
 
 def parse_rename(text):
