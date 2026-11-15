@@ -47,6 +47,11 @@ active_object_crops = {}
 is_listening = False
 last_camera_move_time = 0
 
+# Event Detection State (appear / move / vanish)
+committed_zone = {}
+zone_votes = defaultdict(list)
+previously_visible_names = set()
+
 # Heading & Display Persistence Buffers
 cumulative_camera_heading = 0.0
 frame_count = 0
@@ -532,6 +537,7 @@ while True:
     candidates = []
     active_people_crops.clear()
     active_object_crops.clear()
+    currently_visible_names = set()
 
     if boxes is not None and boxes.id is not None:
         for box in boxes:
@@ -677,22 +683,53 @@ while True:
 
             dist_phrase = format_distance(dist_feet)
 
-            # Update Live Memory & SQLite
+            # Update Live Memory & SQLite (+ Event Detection: appear / move)
             if camera_is_stable:
+                is_trackable = display_name not in ["Unfamiliar Person", "Person"]
+                event_status = "VISIBLE"
+
+                if is_trackable:
+                    currently_visible_names.add(display_name)
+                    was_away = (display_name not in live_memory) or \
+                               (current_time - live_memory[display_name]["last_seen"] > 2.5)
+
+                    if display_name not in committed_zone:
+                        committed_zone[display_name] = zone
+                        zone_votes[display_name] = []
+                        print(f"🆕 NEW: '{display_name}' first seen {zone}.")
+                    elif was_away:
+                        committed_zone[display_name] = zone
+                        zone_votes[display_name] = []
+                        print(f"👋 BACK: '{display_name}' reappeared {zone}.")
+                    else:
+                        # Require 4/5 consistent frames before trusting a zone change,
+                        # so a box jittering near a left/center/right boundary doesn't
+                        # register as a false "moved" event.
+                        zone_votes[display_name].append(zone)
+                        if len(zone_votes[display_name]) > 5:
+                            zone_votes[display_name].pop(0)
+                        majority_zone, vote_count = Counter(zone_votes[display_name]).most_common(1)[0]
+                        if majority_zone != committed_zone[display_name] and vote_count >= 4:
+                            print(f"↔️ MOVED: '{display_name}' shifted from {committed_zone[display_name]} to {majority_zone}.")
+                            committed_zone[display_name] = majority_zone
+                            event_status = "MOVED"
+
                 live_memory[display_name] = {
                     "last_zone": zone,
                     "last_seen": current_time,
                     "dist_feet": dist_feet,
-                    "dist_phrase": dist_phrase
+                    "dist_phrase": dist_phrase,
+                    "last_x": center_x,
+                    "last_y": center_y
                 }
-                
-                if display_name not in ["Unfamiliar Person", "Person"]:
+
+                if is_trackable:
                     memory_db.save_object_observation(
-                        display_name.lower(), 
-                        zone, 
-                        center_x, 
-                        center_y, 
-                        status="VISIBLE"
+                        display_name.lower(),
+                        zone,
+                        center_x,
+                        center_y,
+                        status=event_status
                     )
 
             # Visual Rendering
@@ -711,9 +748,34 @@ while True:
                 (x1, max(25, y1 - 8)), 
                 cv2.FONT_HERSHEY_SIMPLEX, 
                 0.55, 
-                box_color, 
+                box_color,
                 2
             )
+
+    # -------------------------------------------------------------
+    # SUB-SYSTEM D.1: VANISH DETECTION
+    # Only runs on stable frames: if the camera itself is panning,
+    # "not detected this frame" just means "out of view right now",
+    # not "actually gone" -- comparing two stable snapshots avoids
+    # that false positive. Note: panning away and back will still
+    # register a GONE event if the item isn't in the new field of
+    # view, since a single camera can't tell "removed" from
+    # "outside current view" -- a known limitation for now.
+    # -------------------------------------------------------------
+    if camera_is_stable:
+        vanished_names = previously_visible_names - currently_visible_names
+        for name in vanished_names:
+            if name in live_memory:
+                last = live_memory[name]
+                print(f"📤 GONE: '{name}' is no longer visible (last seen {last['last_zone']}).")
+                memory_db.save_object_observation(
+                    name.lower(),
+                    last["last_zone"],
+                    last.get("last_x", 0),
+                    last.get("last_y", 0),
+                    status="MISSING"
+                )
+        previously_visible_names = currently_visible_names
 
     # -------------------------------------------------------------
     # SUB-SYSTEM E: HEADS-UP DISPLAY (HUD)
