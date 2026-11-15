@@ -35,12 +35,19 @@ from collections import namedtuple
 from .config import OCRConfig
 from .image_preprocessing import prepare
 from .ocr_engine import TesseractEngine
-from .text_filter import RepeatFilter, extract_text
+from .text_filter import RepeatFilter, extract_text, is_unclear
 
 OCRMessage = namedtuple("OCRMessage", "text is_answer key")
 
 OFF, WAITING, READING = "OFF", "WAITING", "READING"
 ONCE, CONTINUOUS = "ONCE", "CONTINUOUS"
+
+UNCLEAR_NOTE = "Some words were unclear, so please check it, especially any numbers."
+
+
+def _with_note(sentence, unclear):
+    return sentence.rstrip(" .") + ". " + UNCLEAR_NOTE if unclear else sentence
+
 
 UNAVAILABLE_REPLY = ("Text reading is not set up. Install Tesseract with: brew install tesseract, "
                      "then restart SENSE.")
@@ -183,7 +190,7 @@ class OCRController:
                     self.log(f"📖 OCR {result.seconds:.2f}s (psm {psm}): {len(result.words)} words -> '{text}'")
                     if not text and self._try_next_mode():
                         return None
-                    self._finish(now, text)
+                    self._finish(now, text, unclear=bool(text) and is_unclear(result.words, self.config))
                 else:
                     self.log(f"📖 OCR failed: {result.error}")
                     self._finish(now, None, error=True)
@@ -214,13 +221,13 @@ class OCRController:
         self.next_read_at = now + self.config.continuous_interval_s
         self.best_blurry = None
 
-    def _finish(self, now, text, error=False):
+    def _finish(self, now, text, error=False, unclear=False):
         self.image = None
         if self.mode == ONCE:
             if error:
                 reply = "Sorry, I could not read that."
             elif text:
-                reply = f"It says: {text}"
+                reply = _with_note(f"It says: {text}", unclear)
             else:
                 reply = ("I can't find any readable text. Hold the text about 30 centimetres "
                          "from the camera, steady and in good light.")
@@ -230,7 +237,7 @@ class OCRController:
         if self.mode == CONTINUOUS:
             if text and not self.repeats.is_repeat(text, now):
                 self.repeats.remember(text, now)
-                self.pending = OCRMessage(f"Text: {text}", False, "ocr:" + text[:40].lower())
+                self.pending = OCRMessage(_with_note(f"Text: {text}", unclear), False, "ocr:" + text[:40].lower())
                 self.pending_since = now
             self._schedule_next(now)
 

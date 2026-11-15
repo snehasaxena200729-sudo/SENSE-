@@ -41,6 +41,12 @@ class OCRConfig:
 
     # --- Text filtering -----------------------------------------------------
     min_word_conf: float = 60.0      # Tesseract confidence 0-100 per word
+    # A reading is called "unclear" (and SENSE says so) when a spoken word scores
+    # below sure_word_conf, or a real-looking word was dropped for low confidence
+    # (but scored at least unclear_floor_conf; lower ones are mostly texture noise).
+    # In testing, misread doses ("more than 6" for 8) scored 60-80, clean words 85+.
+    sure_word_conf: float = 85.0
+    unclear_floor_conf: float = 30.0
     min_text_chars: int = 3          # fewer letters/digits than this in total = no text
     max_spoken_words: int = 40       # long text is cut, so one read never talks for a minute
     duplicate_similarity: float = 0.85   # 0..1, difflib ratio; above = "the same text again"
