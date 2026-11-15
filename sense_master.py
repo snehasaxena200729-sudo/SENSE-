@@ -5,6 +5,8 @@ import numpy as np
 import time
 import subprocess
 import threading
+import queue
+import argparse
 from collections import defaultdict, Counter
 import speech_recognition as sr
 from ultralytics import YOLO
@@ -13,10 +15,18 @@ import memory_db
 # =====================================================================
 # 1. INITIALIZATION & SETUP
 # =====================================================================
+# Video source: webcam index (default 0) or a path to a recorded video file.
+# Example: python sense_master.py --source test_clips/desk.mp4
+parser = argparse.ArgumentParser(description="SENSE Master Assistive System")
+parser.add_argument("--source", default="0",
+                    help="Camera index (e.g. 0) or path to a video file for repeatable testing")
+args = parser.parse_args()
+video_source = int(args.source) if args.source.isdigit() else args.source
+
 memory_db.init_database()
 print("Starting SENSE Master Spatial Intelligence System (Dual-Tier Object Re-ID)...")
 model = YOLO("yolov8s.pt")
-camera = cv2.VideoCapture(0)
+camera = cv2.VideoCapture(video_source)
 
 recognizer = sr.Recognizer()
 recognizer.pause_threshold = 1.3
@@ -28,6 +38,8 @@ lk_params = dict(winSize=(31, 31), maxLevel=3,
                  criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 15, 0.03))
 
 ret, old_frame = camera.read()
+if not ret:
+    raise SystemExit(f"Could not read from video source: {args.source}")
 old_gray = cv2.cvtColor(old_frame, cv2.COLOR_BGR2GRAY)
 p0 = cv2.goodFeaturesToTrack(old_gray, mask=None, **feature_params)
 
@@ -46,6 +58,12 @@ active_people_crops = {}
 active_object_crops = {}
 is_listening = False
 last_camera_move_time = 0
+
+# Voice hand-off queue (listener thread -> main thread).
+# The listener thread only records and transcribes, then puts the text here.
+# The main loop answers it, so all shared dicts are touched by ONE thread only.
+# Items are tuples: ("text", transcript) or ("error", message_to_speak).
+voice_queue = queue.Queue()
 
 # Event Detection State (appear / move / vanish)
 committed_zone = {}
@@ -446,17 +464,33 @@ def listen_in_background():
                 initial_prompt="Sneha, Mummy, water bottle, medicine bottle, phone, laptop."
             )
             print(f"👂 Heard: '{text.strip()}'")
-            answer_voice_query(text.strip())
+            # Do NOT answer here: hand the text to the main thread.
+            voice_queue.put(("text", text.strip()))
     except Exception as e:
         print(f"Ear note: {e}")
-        speak("Sorry, I had trouble hearing that.")
+        voice_queue.put(("error", "Sorry, I had trouble hearing that."))
     finally:
         is_listening = False
 
 def trigger_voice():
     global is_listening
     if not is_listening:
+        # Set the flag BEFORE starting the thread, so a second key press
+        # can never start a second listener (keeps us at 2 threads max).
+        is_listening = True
         threading.Thread(target=listen_in_background, daemon=True).start()
+
+def process_voice_queue():
+    """Runs on the main thread: answers any transcripts the listener produced."""
+    while True:
+        try:
+            kind, payload = voice_queue.get_nowait()
+        except queue.Empty:
+            return
+        if kind == "text":
+            answer_voice_query(payload)
+        else:
+            speak(payload)
 
 # Startup Greeting
 saved_items = memory_db.get_all_remembered_items()
@@ -467,6 +501,10 @@ speak(f"Sense Master Online. Restored {len(saved_items)} objects and {len(known_
 # 5. MAIN REAL-TIME MULTIMODAL LOOP
 # =====================================================================
 while True:
+    # Answer pending voice questions first, on the main thread, using the
+    # crops and memory from the previous frame (before they are cleared below).
+    process_voice_queue()
+
     success, frame = camera.read()
     if not success:
         break

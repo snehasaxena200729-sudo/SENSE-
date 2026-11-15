@@ -1,0 +1,17 @@
+# Personal data: environmental memory, people and item profiles.
+# Each user's database should stay on their own machine.
+sense_memory.db
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# VS Code Code Runner scratch file
+tempCodeRunnerFile.py
+
+# macOS
+.DS_Store
+
+# Recorded test videos (large binaries)
+*.mp4
+*.mov

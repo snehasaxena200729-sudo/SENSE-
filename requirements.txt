@@ -1,0 +1,15 @@
+# Packages imported by sense_master.py and memory_db.py.
+# Versions are not pinned because the working versions on the
+# development Mac are not recorded in the repo. To pin them, run
+#   pip freeze > requirements.lock.txt
+# on the machine where SENSE works.
+
+ultralytics          # YOLOv8 + built-in ByteTrack (also installs torch)
+lap                  # needed by ByteTrack; install now so Ultralytics never pip-installs it at runtime
+opencv-python        # camera, Lucas-Kanade optical flow, histograms, HUD window
+numpy
+SpeechRecognition    # microphone capture + recognize_whisper wrapper
+openai-whisper       # local Whisper speech-to-text (weights cached in ~/.cache/whisper after first run)
+PyAudio              # PortAudio bindings used by SpeechRecognition's Microphone (macOS: brew install portaudio first)
+
+# System requirement (not pip): macOS `say` command for speech output.
