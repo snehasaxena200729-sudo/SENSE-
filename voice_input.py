@@ -93,25 +93,6 @@ def audio_to_float(audio):
     return np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0
 
 
-def flush_input(source):
-    """Discard audio already waiting in the microphone buffer (the beep).
-    Returns the seconds discarded (0 if the stream can't tell)."""
-    try:
-        n = source.stream.pyaudio_stream.get_read_available()
-    except Exception:  # noqa: BLE001  (not a PyAudio stream, e.g. tests)
-        return 0.0
-    if n > 0:
-        source.stream.read(n)
-    return n / float(getattr(source, "SAMPLE_RATE", 16000) or 16000)
-
-
-def audio_seconds(audio):
-    try:
-        return len(audio.get_raw_data()) / float(audio.sample_rate * audio.sample_width)
-    except Exception:  # noqa: BLE001
-        return 0.0
-
-
 def find_mic(sr_module, wanted):
     """Index of the first input device whose name contains `wanted` (case-insensitive)."""
     if not wanted:
@@ -225,36 +206,25 @@ class VoiceInput:
         t0 = self.clock()
         t_mic = t0
         try:
-            self.stage = "opening mic"
+            self.stage = "cue"
             self.stop_speech()
+            self.play_cue()
             mic_kwargs = {} if self.mic_index is None else {"device_index": self.mic_index}
-            # Field log (krish, Mac): "mic open after 1.54s". Starting PortAudio
-            # takes ~1 s on the Mac. The beep used to play BEFORE that, so the
-            # first words ("This is") were spoken into a closed microphone and
-            # Whisper only got "Sneha". Now: open the mic first, THEN beep, so
-            # the beep really means "recording now".
             with self.sr.Microphone(**mic_kwargs) as source:
                 t_mic = self.clock()
-                self.log(f"\n🎙️ Mic opened after {t_mic - t0:.2f}s")
-                self.stage = "cue"
-                self.play_cue()
-                dropped = flush_input(source)          # the beep itself is not speech
-                t_cue = self.clock()
                 self.stage = "recording"
-                self.log(f"🎙️ Beep done (+{t_cue - t_mic:.2f}s, {dropped:.2f}s of beep audio discarded). "
-                         f"Listening now... energy threshold "
-                         f"{getattr(self.recognizer, 'energy_threshold', 0):.0f}")
+                self.log(f"\n🎙️ Listening now... (mic open after {t_mic - t0:.2f}s, "
+                         f"energy threshold {getattr(self.recognizer, 'energy_threshold', 0):.0f})")
                 audio = self.recognizer.listen(source, timeout=LISTEN_START_TIMEOUT_S,
                                                phrase_time_limit=LISTEN_MAX_PHRASE_S)
-                t_mic = t_cue
             t_rec = self.clock()        # microphone is released before the (slower) transcription
             self.stage = "transcribing"
             prompt = self.get_prompt()
             result = self._transcribe(audio, prompt)
             text = (result.get("text", "") if isinstance(result, dict) else str(result)).strip()
             t_done = self.clock()
-            self.log(f"👂 Heard: '{text}'  ⏱ audio {audio_seconds(audio):.1f}s, listened {t_rec - t_mic:.1f}s, "
-                     f"Whisper {t_done - t_rec:.1f}s, total {t_done - t0:.1f}s since space")
+            self.log(f"👂 Heard: '{text}'  ⏱ recorded {t_rec - t_mic:.1f}s, Whisper {t_done - t_rec:.1f}s, "
+                     f"total {t_done - t0:.1f}s since space")
             if is_no_speech(result):
                 self.log("👂 Whisper marked this as no speech: ignored.")
                 self.queue.put(("error", "I didn't hear a question. Press space and speak after the beep."))
