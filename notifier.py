@@ -68,6 +68,9 @@ class Notifier:
         hold=True while the microphone is open: only P1 (safety) may speak,
         everything else waits, so SENSE never talks into its own recording."""
         now = self.clock()
+        if len(self.last_spoken_key_at) > 200:     # forget keys whose cooldown is long over
+            horizon = max(self.PER_ITEM_COOLDOWN_S, self.P1_COOLDOWN_S)
+            self.last_spoken_key_at = {k: t for k, t in self.last_spoken_key_at.items() if now - t < horizon}
         self.pending = [p for p in self.pending if now - p[2] <= self.MAX_WAIT_S]
         heapq.heapify(self.pending)
         if not self.pending:

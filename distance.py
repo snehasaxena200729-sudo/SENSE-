@@ -59,6 +59,18 @@ OBJECT_SIZES = {
     "bed": (2.00, 0.15), "table": (1.20, 0.35), "plant": (0.50, 0.50),
     "tv": (1.00, 0.35), "dog": (0.70, 0.50), "cat": (0.45, 0.30),
     "suitcase": (0.65, 0.25), "bench": (1.50, 0.30), "bicycle": (1.70, 0.15),
+    "door": (2.00, 0.08), "stairs": (1.00, 0.45), "person": (1.70, 0.15),
+}
+# When the longest side is cut off by the frame, the OTHER axis may still be
+# measurable: (height, width) as (metres, relative uncertainty). A door seen up
+# close is cut off at the top and bottom, but its width is still visible.
+OBJECT_AXES = {
+    "door": ((2.00, 0.08), (0.85, 0.15)),
+    "chair": ((0.90, 0.20), (0.50, 0.30)),
+    "bed": (None, (1.60, 0.35)),
+    "couch": ((0.85, 0.25), (1.90, 0.30)),
+    "table": ((0.75, 0.15), None),
+    "stairs": (None, (1.00, 0.45)),
 }
 
 
@@ -141,7 +153,15 @@ def object_distance(category, box, frame_w, frame_h, f_px, focal_unc=FOCAL_UNCER
     x1, y1, x2, y2 = box
     longest = max(x2 - x1, y2 - y1)
     est = from_size(real, longest, f_px, focal_unc, "object size")
-    if clipped_edges(box, frame_w, frame_h):
+    edges = clipped_edges(box, frame_w, frame_h)
+    axes = OBJECT_AXES.get(category)
+    if edges and axes:
+        height, width = axes
+        if width and not edges & {"left", "right"} and (x2 - x1) > 0.05 * frame_w:
+            return from_size(width, x2 - x1, f_px, focal_unc, "width")
+        if height and not edges & {"top", "bottom"} and (y2 - y1) > 0.05 * frame_h:
+            return from_size(height, y2 - y1, f_px, focal_unc, "height")
+    if edges:
         # part of the object is outside the view: it is closer than this
         return Estimate(None, None, est.high, "upper-bound", upper_bound_only=True)
     # A tilted object looks shorter than its longest side -> it may be closer

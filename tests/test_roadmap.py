@@ -303,34 +303,17 @@ class TestSceneHazards(unittest.TestCase):
             box = types.SimpleNamespace(cls=[164], conf=[0.3], xyxy=[np.array([270, 240 - self.h // 2, 370, 240 + self.h // 2])])
             return [types.SimpleNamespace(boxes=[box])]
 
-    def test_door_growing_ahead_warns_and_runs_every_n_frames(self):
+    def test_door_detected_every_n_frames(self):
+        # announcements / proximity moved to continuity.py (tests/test_continuity.py)
         import hazards
         fake = self.FakeModel()
         det = hazards.SceneHazardDetector(fake)
         frame = np.zeros((480, 640, 3), np.uint8)
-        alerts, t = [], 0.0
-        for i in range(1, 16):
-            t += 1 / 15.0
-            if i % det.EVERY_N == 0:
-                fake.h = int(fake.h * 1.3)      # walking towards the door
-            alerts += det.update(frame, i, t)
+        results = [det.detect(frame, i, i / 15.0) for i in range(1, 16)]
         self.assertEqual(fake.calls, 3)
-        self.assertIn(("new:door", "Door in front of you"), alerts)       # said once on sight
-        self.assertIn(("scene:door", "Careful, door right in front of you"), alerts)
+        self.assertEqual([r[0][0] for r in results if r], ["door"] * 3)
         self.assertTrue(det.boxes and det.boxes[0][0] == "door")
-
-    def test_door_far_and_still_is_quiet(self):
-        import hazards
-        fake = self.FakeModel()
-        fake.h = 100
-        det = hazards.SceneHazardDetector(fake)
-        frame = np.zeros((480, 640, 3), np.uint8)
-        alerts = []
-        for i in range(1, 31):
-            alerts += det.update(frame, i, i / 15.0)
-        # a still door is named once (also for "what do you see"), never a "careful" warning
-        self.assertEqual(alerts, [("new:door", "Door in front of you")])
-        self.assertIn("door", det.visible(2.0))
+        self.assertIn("door", det.visible(1.0))
 
 
 class TestMemoryDB(unittest.TestCase):

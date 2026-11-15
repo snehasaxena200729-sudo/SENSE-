@@ -49,7 +49,13 @@ class PersonIdentityGate:
         """Record one identity check for a track.
 
         result: NO_FACE (ignored), UNKNOWN, or an enrolled name that the face
-        recogniser has already accepted (similarity above its threshold).
+        recogniser has already accepted (similarity >= threshold AND margin).
+
+        Lock:    >= NEEDED of the last WINDOW checks say this name, and none
+                 says a DIFFERENT enrolled name. (An earlier rule demanded all
+                 WINDOW agree; one borderline frame then blocked the name.)
+        Release: >= NEEDED of the last WINDOW checks are clear faces that are
+                 NOT this name (someone else, or ByteTrack swapped ids).
         """
         if result is NO_FACE:
             return self.label(tid)
@@ -57,18 +63,22 @@ class PersonIdentityGate:
         hist.append(result)
         name = self.locked.get(tid)
         if name is not None:
-            against = sum(1 for r in hist if r != name)
-            if against >= self.NEEDED:
+            if sum(1 for r in hist if r != name) >= self.NEEDED:
                 del self.locked[tid]
-        else:
-            for candidate in set(hist):
-                if candidate == UNKNOWN:
-                    continue
-                votes = sum(1 for r in hist if r == candidate)
-                if votes >= self.NEEDED and votes == len(hist):
+                name = None
+        if name is None:
+            names = {r for r in hist if r != UNKNOWN}
+            if len(names) == 1:
+                candidate = names.pop()
+                if sum(1 for r in hist if r == candidate) >= self.NEEDED:
                     self.locked[tid] = candidate
-                    break
         return self.label(tid)
+
+    def reset_track(self, tid):
+        """Forget the identity checks of one track (e.g. right after enrolment,
+        so 'unknown' results from before do not count against the new name)."""
+        self.history.pop(tid, None)
+        self.locked.pop(tid, None)
 
     def label(self, tid):
         """The verified name for this track, or None."""

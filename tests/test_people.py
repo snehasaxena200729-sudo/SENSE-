@@ -38,11 +38,33 @@ class TestPersonIdentityGate(unittest.TestCase):
             g.observe(1, "Sneha")
         self.assertEqual(g.spoken(1), "Sneha")
 
-    def test_disagreement_blocks_the_lock(self):
+    def test_another_name_blocks_the_lock(self):
         g = PersonIdentityGate()
-        for r in ["Sneha", "Sneha", UNKNOWN, "Sneha"]:
+        for r in ["Sneha", "Sneha", "Mummy", "Sneha"]:
             g.observe(1, r)
         self.assertIsNone(g.label(1))
+
+    def test_one_borderline_frame_does_not_block(self):
+        # field regression: one 'unknown' among matches used to stop the name forever
+        g = PersonIdentityGate()
+        for r in [UNKNOWN, UNKNOWN, "Sneha", UNKNOWN, "Sneha", "Sneha"]:
+            g.observe(1, r)
+        self.assertEqual(g.label(1), "Sneha")
+
+    def test_mostly_unknown_never_locks(self):
+        g = PersonIdentityGate()
+        for r in ["Sneha", UNKNOWN, UNKNOWN, "Sneha", UNKNOWN] * 4:
+            g.observe(1, r)
+        self.assertIsNone(g.label(1))
+
+    def test_reset_track(self):
+        g = PersonIdentityGate()
+        for _ in range(3):
+            g.observe(1, UNKNOWN)
+        g.reset_track(1)
+        for _ in range(3):
+            g.observe(1, "Sneha")
+        self.assertEqual(g.label(1), "Sneha")
 
     def test_turning_away_keeps_the_name(self):
         g = PersonIdentityGate()
