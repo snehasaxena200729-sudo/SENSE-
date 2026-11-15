@@ -300,7 +300,7 @@ class TestSceneHazards(unittest.TestCase):
         def predict(self, frame, classes=None, **kw):
             self.calls += 1
             assert set(classes) == {164, 489}
-            box = types.SimpleNamespace(cls=[164], xyxy=[np.array([270, 240 - self.h // 2, 370, 240 + self.h // 2])])
+            box = types.SimpleNamespace(cls=[164], conf=[0.3], xyxy=[np.array([270, 240 - self.h // 2, 370, 240 + self.h // 2])])
             return [types.SimpleNamespace(boxes=[box])]
 
     def test_door_growing_ahead_warns_and_runs_every_n_frames(self):
@@ -315,7 +315,8 @@ class TestSceneHazards(unittest.TestCase):
                 fake.h = int(fake.h * 1.3)      # walking towards the door
             alerts += det.update(frame, i, t)
         self.assertEqual(fake.calls, 3)
-        self.assertIn(("door", "Careful, door right in front of you"), alerts)
+        self.assertIn(("new:door", "Door in front of you"), alerts)       # said once on sight
+        self.assertIn(("scene:door", "Careful, door right in front of you"), alerts)
         self.assertTrue(det.boxes and det.boxes[0][0] == "door")
 
     def test_door_far_and_still_is_quiet(self):
@@ -327,7 +328,9 @@ class TestSceneHazards(unittest.TestCase):
         alerts = []
         for i in range(1, 31):
             alerts += det.update(frame, i, i / 15.0)
-        self.assertEqual(alerts, [])
+        # a still door is named once (also for "what do you see"), never a "careful" warning
+        self.assertEqual(alerts, [("new:door", "Door in front of you")])
+        self.assertIn("door", det.visible(2.0))
 
 
 class TestMemoryDB(unittest.TestCase):
