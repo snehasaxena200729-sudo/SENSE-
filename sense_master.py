@@ -20,6 +20,7 @@ from events import EventTracker
 from notifier import Notifier, P1, P2, P3
 from hazards import LoomingDetector, ApproachTracker, SceneHazardDetector
 from people import PersonIdentityGate, count_phrase
+from face_id import FaceID, Enrolment, decide as face_decide
 
 # =====================================================================
 # 1. INITIALIZATION & SETUP
@@ -70,8 +71,31 @@ p0 = cv2.goodFeaturesToTrack(old_gray, mask=None, **feature_params)
 # Only names that a real face check verifies (person_gate) are ever spoken.
 legacy_people = memory_db.load_all_people_visual_profiles()
 LEGACY_PEOPLE = {n.lower() for n in legacy_people}
-known_people = {}            # people whose identity can be VERIFIED (face recognition)
+known_people = {}            # name -> enrolment time, for people verifiable by FACE
 person_gate = PersonIdentityGate()
+# Audit fix 4: real identity = face recognition (OpenCV YuNet + SFace, offline
+# after a one-time model download). Without it, nobody is ever named.
+face_ident = FaceID.create()
+enrolment = None             # an active "this is Sneha" face-sample collection
+face_eye_px = {}             # track id -> (time, eye distance in px) for distance
+FACE_EVERY_N = 3             # identity check on every 3rd frame per person (CPU budget)
+
+
+def refresh_people():
+    """Reload face profiles from SQLite into the recogniser and known_people."""
+    global whisper_prompt
+    known_people.clear()
+    if face_ident is not None:
+        face_ident.set_profiles(memory_db.load_face_profiles())
+        known_people.update(face_ident.since)
+    whisper_prompt = ", ".join(list(known_people) + ["water bottle", "medicine bottle", "phone",
+                                                     "laptop", "rename", "forget"]) + "."
+
+
+whisper_prompt = ""
+refresh_people()
+if face_ident is not None:
+    print(f"🙂 Face recognition on. People enrolled by face: {list(known_people) or 'none yet'}")
 live_people = {}             # track id -> what we know about an (unnamed) person in view
 known_objects = memory_db.load_all_custom_object_profiles()
 if legacy_people:
@@ -289,15 +313,54 @@ def match_custom_object(crop, base_category, threshold=0.55):
 STOPWORDS = {"now", "here", "there", "it", "this", "that", "me", "you", "them", "someone", "something", "anything", "please"}
 
 def learn_person(name):
-    """'This is Sneha'. Audit fix 1: SENSE used to save the SHIRT colour and then
-    call anyone in a similar shirt 'Sneha'. Without a face-recognition model it
-    cannot verify who someone is, so it refuses to learn a name instead of
-    guessing. Everybody is called 'a person'."""
+    """'This is Sneha'. Audit fix 4: learns the FACE (several samples over a few
+    seconds, collected by the main loop so nothing blocks). The old version saved
+    the shirt colour, which matched other people."""
+    global enrolment
+    if face_ident is None:
+        speak("Face recognition is not available, so I won't name people. I will call everyone a person.")
+        return
     if not active_people_crops:
         speak("I don't see anyone clearly in front of the camera.")
         return
-    speak("I can't recognise faces yet, so I won't name people. I will call everyone a person.")
-    print(f"🙅 Not learning '{name}': no face recognition available.")
+    clean_name = name.strip(" .,!?").title()
+    if not clean_name or clean_name.lower() in STOPWORDS:
+        speak("That does not seem like a person's name.")
+        return
+    def face_size(tid):     # the person showing the biggest face is the one being introduced
+        crop = active_people_crops[tid]["crop"]
+        _, face = face_ident.best_face(crop, (0, 0, crop.shape[1], crop.shape[0]))
+        return 0.0 if face is None else float(face[2] * face[3])
+    sizes = {tid: face_size(tid) for tid in active_people_crops}
+    target = max(sizes, key=sizes.get)
+    if sizes[target] == 0.0:
+        speak("I can't see a face. Please look at the camera and say it again.")
+        return
+    enrolment = Enrolment(clean_name, target, time.time())
+    speak(f"Okay. {clean_name}, please look at the camera for a moment.")
+    print(f"🙂 Enrolling '{clean_name}' on track {target}...")
+
+
+def finish_enrolment(now):
+    """Called by the main loop when the face samples are collected (or time ran out)."""
+    global enrolment
+    e, enrolment = enrolment, None
+    if not e.ok():
+        speak(f"I couldn't see {e.name}'s face clearly. Face the camera in good light and say it again.")
+        return
+    if not e.consistent():
+        speak("The face changed while I was learning. Please try again with only one person in view.")
+        return
+    others = {n: embs for n, embs in face_ident.profiles.items() if n.lower() != e.name.lower()}
+    votes = [face_decide(emb, others)[0] for emb in e.samples] if others else []
+    clash = [v for v in votes if isinstance(v, str) and v in others]
+    if len(clash) > len(votes) // 2:
+        speak(f"This face already looks like {clash[0]}. If that is wrong, say forget {clash[0]}, then try again.")
+        return
+    memory_db.save_face_embeddings(e.name, e.samples, created_at=now)
+    refresh_people()
+    print(f"✨ Enrolled {e.name} by face ({len(e.samples)} samples).")
+    speak(f"Got it. I will recognise {e.name} by face.")
 
 def learn_custom_object(custom_name):
     """Voice trainer: strictly locks object category based on what you said."""
@@ -484,6 +547,9 @@ def answer_voice_query(user_text):
 
     # 2. Memory: newest matching record, world-anchored and uncertainty-aware (E4 + E5)
     db_record = memory_db.find_latest_memory(found_target)
+    person_since = {p.lower(): t for p, t in known_people.items()}.get(found_target.lower())
+    if db_record is not None and person_since and db_record["last_seen"] < person_since:
+        db_record = None      # that sighting came from clothing colour, not a face
     if db_record is None:
         speak(f"I have no record of {found_target} in my memory database.")
         return
@@ -493,6 +559,10 @@ def answer_voice_query(user_text):
         speak(f"I last saw {name} {answers.format_time_ago(age)}, {db_record['last_zone']}.")
         return
     where, turn_hint, same_session = location_words(db_record)
+    if person_since:
+        # people walk around: report the last verified sighting, never "probably still there"
+        speak(f"I last recognised {name} {answers.format_time_ago(age)}, {where}. I can't see them now.")
+        return
     relation = memory_relation(db_record) if same_session else None
     sentence, level, score = answers.describe_memory(
         name, age, db_record.get("status"), where, same_session, turn_hint, relation)
@@ -605,7 +675,13 @@ def answer_who(current_time):
               "I only know when a person is in view.")
         return
     people = {p.lower(): p for p in known_people}
-    seen = [r for r in memory_db.get_memories_seen_since(midnight) if r["name"] in people]
+    since = {p.lower(): t for p, t in known_people.items()}
+    # only sightings verified by face (older ones came from clothing colour)
+    seen = [r for r in memory_db.get_memories_seen_since(midnight)
+            if r["name"] in people and r["last_seen"] >= since[r["name"]]]
+    if not seen:
+        speak("I have not recognised anyone by face today.")
+        return
     if not seen:
         speak("I have not recognised anyone I know today.")
         return
@@ -671,9 +747,7 @@ def rename_command(user_text):
     memory_db.rename(old, new_name)
     if old in known_objects:
         known_objects[new_name] = known_objects.pop(old)
-    for k in list(known_people):
-        if k.lower() == old:
-            known_people[new_name.title()] = known_people.pop(k)
+    refresh_people()      # face profiles were renamed in SQLite
     for tid, n in list(track_locked_identities.items()):
         if n.lower() == old:
             track_locked_identities[tid] = new_name.title()
@@ -699,6 +773,7 @@ def forget_command(user_text):
         speak("Tell me who or what to forget, for example: forget my bottle.")
         return
     memory_db.forget(target)
+    refresh_people()      # face profiles were deleted in SQLite
     for store in (known_people, legacy_people):
         for k in list(store):
             if k.lower() == target.lower():
@@ -755,9 +830,9 @@ def handle_event(ev):
         notifier.push(P2 if is_personal else P3, lower, text)
 
 
-# Whisper hint words. Names are only included for people SENSE can verify, so the
-# transcriber is not nudged into hearing a name that was never said.
-whisper_prompt = ", ".join(list(known_people) + ["water bottle", "medicine bottle", "phone", "laptop", "rename", "forget"]) + "."
+# Whisper hint words (whisper_prompt) come from refresh_people(): names are only
+# included for people SENSE can verify, so Whisper is not nudged into hearing a
+# name that was never said.
 EARCON = "/System/Library/Sounds/Tink.aiff"   # short macOS sound: "speak now"
 WHISPER_JUNK = {"", "listening", "you", "thank you", "thanks for watching", "bye"}
 LISTEN_START_TIMEOUT_S = 5.0     # time to START speaking (as before PR #3: 4.5)
@@ -852,6 +927,7 @@ while True:
     frame_height, frame_width, _ = frame.shape
     f_px = distance.focal_px(frame_width, focal_ratio=FOCAL_RATIO)
     frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    raw_frame = frame.copy()   # crops come from here: `frame` gets HUD boxes drawn on it
     frame_count += 1
 
     # -------------------------------------------------------------
@@ -1007,18 +1083,30 @@ while True:
             zone = get_spatial_zone_from_x(center_x, frame_width)
             w_px = x2 - x1
             h_px = y2 - y1
-            crop = frame[y1:y2, x1:x2]
+            crop = raw_frame[y1:y2, x1:x2]
 
                        # --- BRANCH 1: PERSON RE-ID ---
             if winner_name == "person":
-                # Audit fix 2: geometry with cut-off detection and an error range
-                est = distance.person_distance((x1, y1, x2, y2), frame_width, frame_height,
-                                               f_px, focal_unc=FOCAL_UNC)
-                
-                # Audit fix 1: detection + tracking say "a person is here", never who.
-                # A name appears only once the identity gate has verified it.
+                # Audit fix 1 + 4: detection + tracking say "a person is here", never
+                # who. A name appears only after face checks pass the identity gate.
                 person_gate.touch(tid, current_time)
+                enrolling = enrolment is not None and enrolment.track_id == tid
+                if face_ident is not None and should_run_yolo and (enrolling or frame_count % FACE_EVERY_N == 0):
+                    result, eye_px, emb = face_ident.check(raw_frame, (x1, y1, x2, y2))
+                    if not enrolling:
+                        person_gate.observe(tid, result)
+                    elif emb is not None:
+                        enrolment.add(emb)
+                    if eye_px:
+                        face_eye_px[tid] = (current_time, eye_px)
                 verified = person_gate.label(tid)
+
+                # Audit fix 2: geometry with cut-off detection and an error range;
+                # the eye distance of a visible face is the most reliable cue
+                eye_t, eye_px = face_eye_px.get(tid, (0.0, None))
+                est = distance.person_distance((x1, y1, x2, y2), frame_width, frame_height, f_px,
+                                               eye_px=eye_px if current_time - eye_t < 0.5 else None,
+                                               focal_unc=FOCAL_UNC)
                 display_name = verified if verified else "Person"
 
                 if crop.size > 0:
@@ -1152,6 +1240,10 @@ while True:
             memory_db.save_entity(eid, ent["name"], ent["category"], ent["color"], ent["sig"], ent["last_seen"])
     resolver.prune_tracks(current_time)
     person_gate.prune(current_time)
+    for old_tid in [t for t, (ts, _) in face_eye_px.items() if current_time - ts > 3]:
+        del face_eye_px[old_tid]
+    if enrolment is not None and enrolment.finished(current_time):
+        finish_enrolment(current_time)
     for old_tid in [t for t, d in live_people.items() if current_time - d["last_seen"] > 5]:
         del live_people[old_tid]
 

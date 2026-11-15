@@ -22,3 +22,6 @@ sense_memory.db-shm
 
 # Door/stairs model, downloaded automatically on first run
 yolov8n-oiv7.pt
+
+# Face recognition models, downloaded automatically on first run (face_id.py)
+models/

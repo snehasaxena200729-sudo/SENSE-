@@ -97,6 +97,15 @@ def init_database():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_name_ts ON events(name, ts)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)")
+    # --- Audit fix 4: face-recognition embeddings (SFace, 128 numbers each) ---
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS face_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            embedding BLOB,
+            created_at REAL
+        )
+    """)
     # --- Roadmap O2: user preferences ---
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS settings (
@@ -370,6 +379,7 @@ def forget(name):
     n = name.lower()
     removed = 0
     removed += conn.execute("DELETE FROM people_profiles WHERE LOWER(name) = ?", (n,)).rowcount
+    removed += conn.execute("DELETE FROM face_profiles WHERE LOWER(name) = ?", (n,)).rowcount
     removed += conn.execute("DELETE FROM custom_object_profiles WHERE LOWER(name) = ?", (n,)).rowcount
     removed += conn.execute("DELETE FROM environmental_memory WHERE object_name = ?", (n,)).rowcount
     removed += conn.execute("DELETE FROM entities WHERE LOWER(name) = ?", (n,)).rowcount
@@ -397,4 +407,30 @@ def rename(old, new):
         changed += conn.execute("UPDATE events SET name = ? WHERE LOWER(name) = ?", (new.title(), o)).rowcount
         conn.execute("DELETE FROM people_profiles WHERE LOWER(name) = ? AND LOWER(name) != ?", (n, o))
         changed += conn.execute("UPDATE people_profiles SET name = ? WHERE LOWER(name) = ?", (new.title(), o)).rowcount
+        conn.execute("DELETE FROM face_profiles WHERE LOWER(name) = ? AND LOWER(name) != ?", (n, o))
+        changed += conn.execute("UPDATE face_profiles SET name = ? WHERE LOWER(name) = ?", (new.title(), o)).rowcount
     return changed
+
+
+# ---- Audit fix 4: face identity --------------------------------------------
+def save_face_embeddings(name, embeddings, created_at=None):
+    """Store several face embeddings (numpy float32 vectors) for one person."""
+    conn = _get_conn()
+    ts = created_at if created_at is not None else time.time()
+    with conn:
+        conn.executemany("INSERT INTO face_profiles (name, embedding, created_at) VALUES (?, ?, ?)",
+                         [(name, np.asarray(e, np.float32).tobytes(), ts) for e in embeddings])
+
+
+def load_face_profiles():
+    """{name: {"embeddings": array (k, 128), "since": first enrolment time}}"""
+    rows = _get_conn().execute("SELECT name, embedding, created_at FROM face_profiles").fetchall()
+    out = {}
+    for name, blob, ts in rows:
+        d = out.setdefault(name, {"embeddings": [], "since": ts})
+        d["embeddings"].append(np.frombuffer(blob, np.float32))
+        d["since"] = min(d["since"], ts)
+    for d in out.values():
+        d["embeddings"] = np.vstack(d["embeddings"])
+    return out
+
