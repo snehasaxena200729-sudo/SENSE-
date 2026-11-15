@@ -30,10 +30,7 @@ models (YuNet 0.2 MB + SFace 37 MB, checksum-verified, into `models/`) (and `lap
 | "Where is my phone?" | Answers live if it's visible. Otherwise gives the last place it was seen, the direction from where you face *now* ("turn about 90 degrees to your right"), a nearby object ("next to the laptop"), and how sure it is |
 | "Find my bottle" / "Help me find my phone" / "Take me to the door" | **Guides you to it** with short cues as you turn and walk: "a little to your left", "straight ahead, a few steps away", then "your bottle should be within reach". If it is not in view, it uses memory ("I last saw it 2 minutes ago, on your left, next to the laptop. Turn about 90 degrees to your left") and updates the turn as you turn. Hazard warnings always come first. See `docs/FIND_MODE.md` |
 | "Stop looking" / "Cancel" / "I found it" | Ends the guidance |
-| "I'm leaving" / "Remember the room" | Takes a **snapshot of the room**: every item it remembers and where it is ("Okay, I remembered 4 things: …") |
-| "What changed since I left?" / "I'm back" / "What happened while I was away?" | **Compares the room with that snapshot** (or, if you didn't say "I'm leaving", with how the room was when SENSE last ran): "Since you left 12 minutes ago: your bottle was moved from in front of you to on your right. The white cup is no longer where it was. New: a laptop on your left. Sneha was here. Everything else is where it was." It only says an item is no longer there after it has really looked at its spot, and says so when it hasn't. See `docs/SCENE_CHANGES.md` |
-| "What changed?" | Right after "I'm leaving" (or in the first 10 minutes after a restart): the snapshot comparison above. Otherwise: what moved, disappeared or appeared since you last asked (max 30 minutes back) |
-| "What changed in the last 10 minutes?" | The same, for that time window ("last hour", "past five minutes", "half an hour" also work) |
+| "What changed?" | Summarises what moved, disappeared or appeared since you last asked (max 30 minutes back) |
 | "Where was my bottle before?" | Uses the event history to say where it was before it moved |
 | "When did you last see my keys?" | Gives the time of the last sighting |
 | "Who was here today?" | Lists people recognised **by face** today |
@@ -71,13 +68,12 @@ SENSE also speaks **on its own**:
 | `notifier.py` | **What to say, and when:** priorities, cooldowns, no talking over itself, quiet/normal/verbose |
 | `spatial.py` | **World-anchored directions** (stored angle + heading), turn instructions, nearby-object relations |
 | `answers.py` | **Intents, fuzzy name matching, confidence scoring** (confirmed / likely / uncertain) and wording |
-| `scene_diff.py` | **"What changed since I left?"** Compares a room snapshot with what was seen since: moved / no longer there / new / not checked yet. Estimates how far the camera was turned between runs by consensus voting, and tracks which directions were actually looked at |
 | `hazards.py` | **Sudden-obstacle warnings:** time-to-contact from optical-flow divergence (any textured object) and box-growth checks for every YOLO class |
 | `continuity.py` | **Object continuity + proximity.** Keeps one identity per object while you walk (camera-motion-compensated matching, ByteTrack id as a hint, no stale boxes), measures approach from the size trend along an axis that is not cut off, one alert per approach |
 | `distance.py` | **Monocular distance with error ranges.** Focal length from resolution (or calibration), cut-off box detection, coarse spoken bands |
 | `face_id.py` | **Face identity.** OpenCV YuNet finds the face, SFace turns it into 128 numbers; a name needs cosine similarity >= 0.363, a margin over everyone else, and a good frontal face. Enrolment collects 5 samples without blocking |
 | `people.py` | **Person naming gate.** Detection (YOLO) and tracking (ByteTrack) never say who someone is; a name is spoken only after a verified identity check agrees 3 of the last 5 times |
-| `memory_db.py` | SQLite tables: `environmental_memory` (latest state), `events` (history), `entities`, people and personal-item profiles, `settings`, `scene_snapshots` + `snapshot_items` (room snapshots) |
+| `memory_db.py` | SQLite tables: `environmental_memory` (latest state), `events` (history), `entities`, people and personal-item profiles, `settings` |
 | `tests/` | Unit tests: `python -m unittest discover -s tests -v` |
 | `tools/run_checks.py` | **All automated checks in one command**: unit + regression tests, and full-app scenarios on clips made by `tools/make_test_videos.py` (walk towards objects, stand still, turn the head, walk to a door, introduce someone / leave / come back / strangers) |
 | `tools/smoke_run.py` | Runs the real app headless on a video and prints what it would have said (`--loop --stats-every 250 --json out.json` for long stress runs) |
