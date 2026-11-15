@@ -31,9 +31,10 @@ missing). After that SENSE works fully offline.
 | "What changed?" | Summarises what moved, disappeared or appeared since you last asked (max 30 minutes back) |
 | "Where was my bottle before?" | Uses the event history to say where it was before it moved |
 | "When did you last see my keys?" | Gives the time of the last sighting |
-| "Who was here today?" | Lists known people seen today |
+| "Who was here today?" | Lists people verified by face recognition today (until face recognition is set up, it says it cannot tell) |
 | "What did you see?" | Lists things seen in the last 10 minutes that are not visible now |
-| "This is Sneha" / "This is my water bottle" | Teaches a person or a personal item |
+| "This is my water bottle" | Teaches a personal item |
+| "This is Sneha" | Needs face recognition. Until it is set up, SENSE refuses and calls everyone "a person" |
 | "Rename my bottle to my medicine" / "Change my bottle to medicine" | Renames a taught item or person; it keeps its look, place and history |
 | "Forget my bottle" / "Forget Sneha" | Deletes the profile, memory and history (privacy) |
 | "Be quiet" / "Normal mode" / "Talk more" | Changes the alert level (saved between runs) |
@@ -59,6 +60,7 @@ SENSE also speaks **on its own**:
 | `spatial.py` | **World-anchored directions** (stored angle + heading), turn instructions, nearby-object relations |
 | `answers.py` | **Intents, fuzzy name matching, confidence scoring** (confirmed / likely / uncertain) and wording |
 | `hazards.py` | **Sudden-obstacle warnings:** time-to-contact from optical-flow divergence (any textured object) and box-growth checks for every YOLO class |
+| `people.py` | **Person naming gate.** Detection (YOLO) and tracking (ByteTrack) never say who someone is; a name is spoken only after a verified identity check agrees 3 of the last 5 times |
 | `memory_db.py` | SQLite tables: `environmental_memory` (latest state), `events` (history), `entities`, people and personal-item profiles, `settings` |
 | `tests/` | Unit tests: `python -m unittest discover -s tests -v` |
 
@@ -76,6 +78,9 @@ Speech output is a separate `say` *process*, not a thread. Threads that librarie
 internally (PyTorch, OpenCV, PortAudio) are not managed by the app.
 
 ## Known limitations
+
+- **People are "a person" unless verified.** Earlier versions named people from the colour of
+  their clothes, which matched different people (8 of 15 pairs in a test). That is removed.
 
 - The heading comes from optical flow. It drifts over time and resets every run, so turn
   directions are only given for things seen in the current run.
