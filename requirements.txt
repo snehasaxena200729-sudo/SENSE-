@@ -13,3 +13,5 @@ openai-whisper       # local Whisper speech-to-text (weights cached in ~/.cache/
 PyAudio              # PortAudio bindings used by SpeechRecognition's Microphone (macOS: brew install portaudio first)
 
 # System requirement (not pip): macOS `say` command for speech output.
+# Optional, for "read this" text reading (ocr/ folder): the Tesseract program.
+#   macOS: brew install tesseract      (no pip package needed; SENSE works without it)

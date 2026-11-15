@@ -252,6 +252,13 @@ def is_speaking():
 # Roadmap E3: decides which events are worth saying out loud.
 notifier = Notifier(speak, is_speaking, level=memory_db.get_setting("notify_level", "normal"))
 
+try:  # optional text reading (ocr/ package); SENSE runs exactly as before without it
+    from ocr import OCRController
+    ocr = OCRController.create()
+except Exception as e:
+    ocr = None
+    print(f"📖 Text reading off ({e})")
+
 def get_spatial_zone_from_x(x_coordinate, frame_width=640):
     third = frame_width / 3.0
     if x_coordinate < third:
@@ -474,6 +481,10 @@ def answer_voice_query(user_text):
     user_text = user_text.lower().strip()
     print(f"👂 Transcribed: '{user_text}'")
     current_time = time.time()
+    ocr_reply = ocr.handle_command(user_text, current_time) if ocr is not None else None
+    if ocr_reply:  # "read this" / "keep reading" / "stop reading"; anything else goes on below
+        speak(ocr_reply)
+        return
     intent = answers.classify_intent(user_text)   # Roadmap E6 (rule-based, offline)
     print(f"🧭 Intent: {intent}")
 
@@ -1200,6 +1211,13 @@ while True:
     if is_camera_moving:
         last_camera_move_time = current_time
     camera_is_stable = (current_time - last_camera_move_time) > 0.8
+    if ocr is not None:  # does nothing until asked; tesseract runs as its own process, never blocks
+        ocr.feed(raw_frame, current_time, camera_moving=is_camera_moving)
+        ocr_msg = ocr.poll(current_time, can_speak=not is_listening and not is_speaking())
+        if ocr_msg and ocr_msg.is_answer:     # the user asked: answer now (SENSE is quiet)
+            speak(ocr_msg.text)
+        elif ocr_msg:                         # "keep reading" news: the notifier lets safety go first
+            notifier.push(P2, ocr_msg.key, ocr_msg.text)
 
     # -------------------------------------------------------------
     # SUB-SYSTEM B: PERCEPTION & TRACKING (YOLOv8s + ByteTrack)
@@ -1571,12 +1589,16 @@ while True:
         break
     elif key == ord(' '):
         trigger_voice()
+    elif key == ord('r') and ocr is not None:   # read the text in front of the camera
+        speak(ocr.handle_command("read this", current_time))
 
 # Save the learned appearance of every named object identity, then close the DB
 for eid, ent in resolver.entities.items():
     if ent.get("name"):
         memory_db.save_entity(eid, ent["name"], ent["category"], ent["color"], ent["sig"], ent["last_seen"])
 memory_db.close()
+if ocr is not None:
+    ocr.close()
 
 camera.release()
 cv2.destroyAllWindows()
