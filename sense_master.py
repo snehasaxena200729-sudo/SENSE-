@@ -1,6 +1,5 @@
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
-
 import cv2
 import numpy as np
 import time
@@ -179,12 +178,16 @@ def get_dominant_color_name(crop):
     elif median_h < 170: return "purple"
     return ""
 
-def match_person(crop, threshold=0.35):
+def match_person(crop, threshold=0.50):
     if not known_people:
         return "Unfamiliar Person"
     h, w, _ = crop.shape
-    upper_body = crop[0:int(h * 0.70), :]
-    sig = get_unified_chroma_signature(upper_body)
+    if h < 30 or w < 30:
+        return "Unfamiliar Person"
+
+    # Pure Torso Crop: Focus strictly on chest/clothing, completely ignoring the room wall!
+    torso = crop[int(h * 0.25):int(h * 0.75), int(w * 0.20):int(w * 0.80)]
+    sig = get_unified_chroma_signature(torso)
     if sig is None:
         return "Unfamiliar Person"
 
@@ -243,8 +246,9 @@ def learn_person(name):
 
     target_data = active_people_crops[target_track_id]
     h, w, _ = target_data["crop"].shape
-    upper_body = target_data["crop"][0:int(h * 0.70), :]
-    sig = get_unified_chroma_signature(upper_body)
+    # Pure Torso Crop for permanent memorization
+    torso = target_data["crop"][int(h * 0.25):int(h * 0.75), int(w * 0.20):int(w * 0.80)]
+    sig = get_unified_chroma_signature(torso)
     
     if sig is not None:
         known_people[clean_name] = sig
@@ -591,7 +595,7 @@ while True:
             h_px = y2 - y1
             crop = frame[y1:y2, x1:x2]
 
-            # --- BRANCH 1: PERSON RE-ID ---
+                       # --- BRANCH 1: PERSON RE-ID ---
             if winner_name == "person":
                 aspect_ratio = h_px / max(1, w_px)
                 real_size = 165.0 if aspect_ratio > 2.0 else 75.0
@@ -606,11 +610,19 @@ while True:
                 if len(track_identity_history[tid]) > 10:
                     track_identity_history[tid].pop(0)
 
+                counts = Counter(track_identity_history[tid])
+
+                # Check active track lock
                 if tid in track_locked_identities:
-                    display_name = track_locked_identities[tid]
+                    # If this person has consistently scored unfamiliar, release the lock!
+                    if counts["Unfamiliar Person"] >= 6:
+                        del track_locked_identities[tid]
+                        display_name = "Unfamiliar Person"
+                    else:
+                        display_name = track_locked_identities[tid]
                 else:
-                    counts = Counter(track_identity_history[tid])
-                    known_matches = [m for m in counts if m != "Unfamiliar Person" and counts[m] >= 2]
+                    # Require at least 4 consistent frames to lock identity
+                    known_matches = [m for m in counts if m != "Unfamiliar Person" and counts[m] >= 4]
                     if known_matches:
                         display_name = known_matches[0]
                         track_locked_identities[tid] = display_name
