@@ -31,6 +31,8 @@ can fake flow; it is an aid, never a safety guarantee.
 
 from collections import deque
 
+import spatial
+
 import numpy as np
 
 try:
@@ -122,3 +124,53 @@ class ApproachTracker:
     def prune(self, now, max_age_s=3.0):
         for tid in [t for t, h in self.history.items() if not h or now - h[-1][0] > max_age_s]:
             del self.history[tid]
+
+
+class SceneHazardDetector:
+    """Doors and stairs - things YOLO's standard (COCO) model has no class for.
+
+    Uses a second, small offline model trained on Google's Open Images V7
+    dataset (yolov8n-oiv7.pt, 600 classes, among them "Door" and "Stairs").
+    Ultralytics downloads it once on the first run, like the Whisper model.
+
+    Cost control: it runs only every EVERY_N frames, on a smaller image, and
+    only for the hazard classes, so the main loop stays fast. No thread.
+    Warnings reuse ApproachTracker: a door ahead that grows quickly (you walk
+    towards it) or suddenly fills the view.
+    """
+    HAZARD_NAMES = ("door", "stairs")
+    EVERY_N = 5
+    IMG_SIZE = 480
+    MIN_CONF = 0.35
+
+    def __init__(self, model):
+        self.model = model
+        self.class_ids = {i: n.lower() for i, n in model.names.items() if n.lower() in self.HAZARD_NAMES}
+        self.approach = ApproachTracker()
+        self.approach.WINDOW_S = 1.2   # we only sample every EVERY_N frames
+        self.boxes = []          # last result, for the HUD: (name, x1, y1, x2, y2)
+
+    def update(self, frame, frame_count, now):
+        """Returns a list of warning sentences (usually empty)."""
+        if not self.class_ids or frame_count % self.EVERY_N:
+            return []
+        res = self.model.predict(frame, classes=list(self.class_ids), conf=self.MIN_CONF,
+                                 imgsz=self.IMG_SIZE, verbose=False)
+        frame_h, frame_w = frame.shape[:2]
+        self.boxes, best = [], {}
+        for box in (res[0].boxes if res and res[0].boxes is not None else []):
+            name = self.class_ids.get(int(box.cls[0]))
+            if name is None:
+                continue
+            x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
+            self.boxes.append((name, x1, y1, x2, y2))
+            angle = spatial.pixel_to_angle((x1 + x2) / 2, frame_w)
+            # per class keep the box closest to straight ahead
+            if name not in best or abs(angle) < abs(best[name][1]):
+                best[name] = (y2 - y1, angle)
+        alerts = []
+        for name, (box_h, angle) in best.items():
+            if self.approach.update("scene:" + name, now, box_h, frame_h, angle):
+                alerts.append((name, f"Careful, {name} right in front of you"))
+        self.approach.prune(now)
+        return alerts

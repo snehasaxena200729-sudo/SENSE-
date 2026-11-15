@@ -17,7 +17,7 @@ import answers
 from identity import EntityResolver
 from events import EventTracker
 from notifier import Notifier, P1, P2, P3
-from hazards import LoomingDetector, ApproachTracker
+from hazards import LoomingDetector, ApproachTracker, SceneHazardDetector
 
 # =====================================================================
 # 1. INITIALIZATION & SETUP
@@ -33,6 +33,16 @@ video_source = int(args.source) if args.source.isdigit() else args.source
 memory_db.init_database()
 print("Starting SENSE Master Spatial Intelligence System (Dual-Tier Object Re-ID)...")
 model = YOLO("yolov8s.pt")
+# Doors / stairs: COCO has no such classes, so a small Open Images model is used
+# (downloaded once on the first run, then offline). SENSE still works without it.
+try:
+    scene_hazards = SceneHazardDetector(YOLO("yolov8n-oiv7.pt"))
+    if not scene_hazards.class_ids:
+        raise ValueError("model has no door/stairs classes")
+    print(f"🚪 Door/stairs detection on: {sorted(set(scene_hazards.class_ids.values()))}")
+except Exception as e:
+    scene_hazards = None
+    print(f"🚪 Door/stairs detection off ({e}). Connect to the internet once to download yolov8n-oiv7.pt.")
 camera = cv2.VideoCapture(video_source)
 
 recognizer = sr.Recognizer()
@@ -930,6 +940,9 @@ while True:
     ttc = looming.update(frame_gray, frame_dt)
     if ttc is not None:
         notifier.push(P1, "looming", "Stop. Something is right in front of you")
+    if scene_hazards is not None:
+        for hz_name, hz_text in scene_hazards.update(frame, frame_count, current_time):
+            notifier.push(P1, "scene:" + hz_name, hz_text)
     is_camera_moving = camera_speed > 3.0
     if is_camera_moving:
         last_camera_move_time = current_time
@@ -1221,6 +1234,11 @@ while True:
         cv2.putText(frame, f"SENSE BRAIN ACTIVE ({heading_display})", (20, 35), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
+    if scene_hazards is not None:   # doors / stairs in purple
+        for hz_name, hx1, hy1, hx2, hy2 in scene_hazards.boxes:
+            cv2.rectangle(frame, (hx1, hy1), (hx2, hy2), (200, 0, 200), 2)
+            cv2.putText(frame, hz_name.title(), (hx1, max(15, hy1 - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 0, 200), 2)
     cv2.imshow("SENSE Master Assistive System", frame)
 
     key = cv2.waitKey(1) & 0xFF

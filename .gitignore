@@ -19,3 +19,6 @@ tempCodeRunnerFile.py
 # SQLite write-ahead log files
 sense_memory.db-wal
 sense_memory.db-shm
+
+# Door/stairs model, downloaded automatically on first run
+yolov8n-oiv7.pt

@@ -7,6 +7,7 @@ They need only numpy (and OpenCV if installed); no camera, mic or YOLO.
 import os
 import sys
 import tempfile
+import types
 import unittest
 
 import numpy as np
@@ -285,6 +286,48 @@ class TestHazards(unittest.TestCase):
         t2 = self.hazards.ApproachTracker()
         t2.update(2, 0.0, 120, 480, 40)
         self.assertFalse(t2.update(2, 0.4, 180, 480, 40))   # off to the side
+
+
+class TestSceneHazards(unittest.TestCase):
+    """Door warnings with a fake Open Images model (the real one needs PyTorch)."""
+    class FakeModel:
+        names = {0: "Person", 164: "Door", 165: "Door handle", 489: "Stairs"}
+
+        def __init__(self):
+            self.h = 150
+            self.calls = 0
+
+        def predict(self, frame, classes=None, **kw):
+            self.calls += 1
+            assert set(classes) == {164, 489}
+            box = types.SimpleNamespace(cls=[164], xyxy=[np.array([270, 240 - self.h // 2, 370, 240 + self.h // 2])])
+            return [types.SimpleNamespace(boxes=[box])]
+
+    def test_door_growing_ahead_warns_and_runs_every_n_frames(self):
+        import hazards
+        fake = self.FakeModel()
+        det = hazards.SceneHazardDetector(fake)
+        frame = np.zeros((480, 640, 3), np.uint8)
+        alerts, t = [], 0.0
+        for i in range(1, 16):
+            t += 1 / 15.0
+            if i % det.EVERY_N == 0:
+                fake.h = int(fake.h * 1.3)      # walking towards the door
+            alerts += det.update(frame, i, t)
+        self.assertEqual(fake.calls, 3)
+        self.assertIn(("door", "Careful, door right in front of you"), alerts)
+        self.assertTrue(det.boxes and det.boxes[0][0] == "door")
+
+    def test_door_far_and_still_is_quiet(self):
+        import hazards
+        fake = self.FakeModel()
+        fake.h = 100
+        det = hazards.SceneHazardDetector(fake)
+        frame = np.zeros((480, 640, 3), np.uint8)
+        alerts = []
+        for i in range(1, 31):
+            alerts += det.update(frame, i, i / 15.0)
+        self.assertEqual(alerts, [])
 
 
 class TestMemoryDB(unittest.TestCase):

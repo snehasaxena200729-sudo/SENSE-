@@ -19,7 +19,7 @@ python sense_master.py --source clip.mp4   # replay a recorded video (repeatable
 Press **space** to talk and **q** to quit. SENSE beeps; start speaking after the beep. You have
 about 5 seconds to start and 5 seconds to speak. The terminal prints how long each step took.
 
-The first run needs internet once, to download the Whisper `tiny` model (and `lap` if it's
+The first run needs internet once, to download the Whisper `tiny` model, the door/stairs model (and `lap` if it's
 missing). After that SENSE works fully offline.
 
 ## What you can say
@@ -81,8 +81,10 @@ internally (PyTorch, OpenCV, PortAudio) are not managed by the app.
   directions are only given for things seen in the current run.
 - Distance is a rough single-camera estimate.
 - Two identical objects (same class and colour) that are never seen together may be treated as one.
-- YOLO's standard model has no "door" class, so SENSE cannot name doors. A plain, untextured door
-  that fills the view also gives the looming check nothing to measure, so the warning can come late.
+- Doors and stairs come from a second small model (`yolov8n-oiv7.pt`, Open Images, about 7 MB),
+  downloaded once on the first run. It runs every 5th frame to keep SENSE fast, so a door warning can
+  come up to a few tenths of a second later than other warnings. Without the model SENSE still runs,
+  just without door/stairs warnings.
 - Obstacle warnings need some texture or a known object: blank walls, glass and stairs going down
   can be missed, and sudden lighting changes can cause a false warning. They are an aid, not a
   safety guarantee.
