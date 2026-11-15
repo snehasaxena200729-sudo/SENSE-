@@ -1242,8 +1242,9 @@ while True:
     continuity_dets = []
 
     candidates = []
-    active_people_crops.clear()
-    active_object_crops.clear()
+    if should_run_yolo:     # skipped frame: keep the last crops ("this is Sneha" while the image moves)
+        active_people_crops.clear()
+        active_object_crops.clear()
     frame_observations = {}   # name -> this frame's stable observation (Roadmap E2)
     enrol_candidates = []     # (eye px, track id, face embedding) while enrolling
     guide_seen = []           # confirmed sightings this frame, for "find my ..." guidance
