@@ -1268,8 +1268,6 @@ while True:
 
     camera_speed = 0.0
     camera_dx = 0.0
-    camera_dy = 0.0     # was only set when optical flow found >= 4 points: a black or
-                        # featureless first frame (camera warming up) crashed with NameError
 
     if p0 is not None and len(p0) > 0:
         p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
