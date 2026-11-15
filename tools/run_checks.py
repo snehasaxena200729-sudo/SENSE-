@@ -164,44 +164,12 @@ def check_people(name, legacy):
     return check
 
 
-def check_restarts(name, restarts):
-    """'This is <name>' once, then SENSE is quit and started again `restarts`
-    times on the same memory database: the name must be recognised every time
-    and the face samples in SQLite must survive every restart unchanged."""
-    def check(runs):
-        errs = []
-        first, later = runs[0], runs[1:]
-        errs += no_errors(first)
-        if not said(first, rf"recognise {name} by face"):
-            errs.append(f"enrolment of {name} not confirmed in the first run")
-        rows = first["db_rows"].get("face_profiles")
-        for k, run in enumerate(later, 1):
-            errs += [f"restart {k}: {e}" for e in no_errors(run)]
-            if not any(t.startswith("Sense Master Online") and "1 people" in t for _, t in run["spoken"][:1]):
-                errs.append(f"restart {k}: greeting did not restore 1 person: {run['spoken'][:1]}")
-            ans = answer_to(run, "what do you see") or ""
-            if name.lower() not in ans.lower():
-                errs.append(f"restart {k}: {name} not recognised: {ans!r}")
-            if run["db_rows"].get("face_profiles") != rows:
-                errs.append(f"restart {k}: face samples changed {rows} -> {run['db_rows'].get('face_profiles')}")
-            if run["db_rows"].get("integrity") != "ok":
-                errs.append(f"restart {k}: database integrity {run['db_rows'].get('integrity')}")
-        return errs
-    return check
-
-
 def run_clip(path, frames, questions, tag, db=None):
     out = os.path.join(tempfile.gettempdir(), f"sense_check_{tag}.json")
     cmd = [sys.executable, os.path.join(ROOT, "tools", "smoke_run.py"), path, str(frames),
            *questions, "--json", out] + (["--db", db] if db else [])
-    if os.path.exists(out):
-        os.remove(out)        # never read a result left over from an earlier run
     t0 = time.time()
-    p = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=1800)
-    if not os.path.exists(out):
-        err = (p.stderr or "").strip().splitlines()[-5:]
-        return {"frames": 0, "took": time.time() - t0, "spoken": [], "samples": [], "frame_times": [],
-                "db_rows": {}, "error": "smoke run crashed (exit %s): %s" % (p.returncode, " / ".join(err))}
+    subprocess.run(cmd, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800)
     with open(out) as f:
         run = json.load(f)
     run["took"] = time.time() - t0
@@ -224,13 +192,6 @@ def main():
     summary = next((l for l in reversed(tail) if l.startswith("Ran ")), "?")
     results.append(("unit + regression tests", r.returncode == 0,
                     [] if r.returncode == 0 else tail[-15:], summary + " " + tail[-1]))
-
-    print("== Voice: 10,000 SPACE presses through the real listener (tools/stress_voice.py)")
-    r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "stress_voice.py")], cwd=ROOT,
-                       capture_output=True, text=True)
-    out = (r.stdout or r.stderr).strip().splitlines()
-    results.append(("voice: 10,000 presses, errors and restarts", r.returncode == 0,
-                    [] if r.returncode == 0 else out[-12:], out[0] if out else ""))
 
     if args.videos:
         n = args.name
@@ -267,28 +228,6 @@ def main():
             spoken = [f"[{f}] {t}" for f, t in run["spoken"][1:]]
             results.append((title, not errs, errs, f"{run['frames']} frames in {run['took']:.0f} s; said: "
                             + (" | ".join(spoken) or "nothing")))
-
-        if os.path.exists(os.path.join(args.videos, "approach_far.mp4")):
-            print("== Scenario: cameras: Camo 1080p shaky, switch, unplug, fallback (tools/camera_drill.py)")
-            r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "camera_drill.py"), args.videos],
-                               cwd=ROOT, capture_output=True, text=True, timeout=900)
-            lines = (r.stdout or "").splitlines()
-            fails = [l for l in lines if l.startswith("FAIL")] or ([] if r.returncode == 0 else lines[-8:])
-            results.append(("cameras: Camo feed, switch, unplug, fallback", r.returncode == 0, fails,
-                            next((l for l in reversed(lines) if l.endswith("failed.")), "")))
-
-        people = os.path.join(args.videos, "people.mp4")
-        if os.path.exists(people):
-            title = f"'this is {n}', then quit and restart SENSE 3 times"
-            print(f"== Scenario: {title} (people.mp4)")
-            db = os.path.join(tempfile.mkdtemp(), "sense_memory.db")
-            runs = [run_clip(people, 60, [f"this is {n.lower()}@10"], "restart_0", db=db)]
-            for k in range(1, 4):
-                runs.append(run_clip(people, 60, ["what do you see@40"], f"restart_{k}", db=db))
-            errs = check_restarts(n, 3)(runs)
-            info = " | ".join((answer_to(r, "what do you see") or "-") for r in runs[1:])
-            results.append((title, not errs, errs, f"face samples in SQLite: "
-                            f"{[r['db_rows'].get('face_profiles') for r in runs]}; answers: {info}"))
 
     print("\n================ RESULTS ================")
     failed = 0

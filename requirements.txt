@@ -13,7 +13,3 @@ openai-whisper       # local Whisper speech-to-text (weights cached in ~/.cache/
 PyAudio              # PortAudio bindings used by SpeechRecognition's Microphone (macOS: brew install portaudio first)
 
 # System requirement (not pip): macOS `say` command for speech output.
-
-# Optional (macOS): exact camera names in OpenCV's order. Without it SENSE asks
-# macOS's built-in `system_profiler`, which is usually enough.
-#   pip install pyobjc-framework-AVFoundation

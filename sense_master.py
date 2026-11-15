@@ -24,30 +24,19 @@ from continuity import ObjectContinuity
 from face_id import FaceID, Enrolment, decide as face_decide
 from guidance import FindGuide
 import scene_diff
-from camera_source import CameraSource, CameraNotFound
-from voice_input import VoiceInput, find_mic, default_mic_name
-from key_input import TerminalKeys, window_key, KEY_NAMES
 
 # =====================================================================
 # 1. INITIALIZATION & SETUP
 # =====================================================================
-# Camera: --camera builtin|camo picks a camera BY NAME (camera_source.py explains
-# why index 0 is not reliable once Camo is installed). The choice is remembered.
-# --source still takes a camera index or a recorded video file for repeatable tests:
-#   python sense_master.py --camera camo
-#   python sense_master.py --source test_clips/desk.mp4
+# Video source: webcam index (default 0) or a path to a recorded video file.
+# Example: python sense_master.py --source test_clips/desk.mp4
 parser = argparse.ArgumentParser(description="SENSE Master Assistive System")
-parser.add_argument("--camera", choices=["builtin", "camo"], default=None,
-                    help="built-in Mac camera or Android phone through Camo (remembered for next time)")
-parser.add_argument("--source", default=None,
+parser.add_argument("--source", default="0",
                     help="Camera index (e.g. 0) or path to a video file for repeatable testing")
-parser.add_argument("--max-width", type=int, default=1280,
-                    help="frames wider than this are scaled down (Camo can send 1080p/4K; YOLO uses 640 anyway)")
-parser.add_argument("--mic", default=None,
-                    help="part of the microphone name to use, e.g. 'MacBook' (default: the Mac's default input)")
 parser.add_argument("--scene-model", default="yolov8n-oiv7.pt",
                     help="door/stairs model; try yolov8s-oiv7.pt if tools/check_doors.py shows it sees your door better")
 args = parser.parse_args()
+video_source = int(args.source) if args.source.isdigit() else args.source
 
 memory_db.init_database()
 print("Starting SENSE Master Spatial Intelligence System (Dual-Tier Object Re-ID)...")
@@ -93,24 +82,7 @@ try:
 except Exception as e:
     scene_hazards = None
     print(f"🚪 Door/stairs detection off ({e}). Connect to the internet once to download {args.scene_model}.")
-
-def _saved_camera(kind):
-    """{"index", "name"} verified by tools/find_cameras.py, or None."""
-    idx = memory_db.get_setting(f"camera_index_{kind}")
-    return {"index": int(idx), "name": memory_db.get_setting(f"camera_name_{kind}")} if idx not in (None, "") else None
-
-
-if args.source is not None:
-    camera_spec = args.source
-elif args.camera:
-    camera_spec = args.camera
-    memory_db.set_setting("camera_source", args.camera)
-else:
-    camera_spec = memory_db.get_setting("camera_source", "builtin")
-_startup_notes = []          # camera problems found before speak() exists; spoken in the greeting
-camera = CameraSource(camera_spec, max_width=args.max_width,
-                      saved={k: _saved_camera(k) for k in ("builtin", "camo")},
-                      announce=lambda msg: _startup_notes.append(msg))
+camera = cv2.VideoCapture(video_source)
 
 recognizer = sr.Recognizer()
 recognizer.pause_threshold = 1.0   # silence that ends a question (was 1.3 s)
@@ -121,10 +93,9 @@ feature_params = dict(maxCorners=150, qualityLevel=0.25, minDistance=12, blockSi
 lk_params = dict(winSize=(31, 31), maxLevel=3,
                  criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 15, 0.03))
 
-try:
-    old_frame = camera.open()
-except CameraNotFound as e:
-    raise SystemExit(f"📷 {e}\n   Cameras: python tools/find_cameras.py   |   video file: --source clip.mp4")
+ret, old_frame = camera.read()
+if not ret:
+    raise SystemExit(f"Could not read from video source: {args.source}")
 old_gray = cv2.cvtColor(old_frame, cv2.COLOR_BGR2GRAY)
 p0 = cv2.goodFeaturesToTrack(old_gray, mask=None, **feature_params)
 
@@ -154,11 +125,8 @@ def refresh_people():
     # Hints only help Whisper SPELL names it has been taught (not "Neha" or "snail").
     # They cannot create an identity: naming needs a verified face.
     hint_names = list(known_people) + [n.title() for n in LEGACY_PEOPLE if n.title() not in known_people]
-    # "forget" is NOT a hint any more: on silence Whisper can return the hint
-    # prompt itself, and a transcript containing "forget" deletes a person
-    # (voice_input.py also rejects such prompt echoes).
     whisper_prompt = ", ".join(hint_names + ["water bottle", "medicine bottle", "phone",
-                                            "laptop", "rename"]) + "."
+                                            "laptop", "rename", "forget"]) + "."
 
 
 whisper_prompt = ""
@@ -222,8 +190,8 @@ track_last_seen = {}       # tid -> last time ByteTrack reported it (to prune th
 track_locked_identities = {}
 active_people_crops = {}
 active_object_crops = {}
+is_listening = False
 last_camera_move_time = 0
-crops_time = 0.0           # when active_*_crops were last filled by YOLO
 
 # Voice hand-off queue (listener thread -> main thread).
 # The listener thread only records and transcribes, then puts the text here.
@@ -499,7 +467,12 @@ def learn_custom_object(custom_name):
 # 4. VOICE INTENT PARSER & WORLD-CENTRIC QUERY ENGINE
 # =====================================================================
 def extract_name_from_speech(text):
-    return answers.extract_name(text)    # moved to answers.py (unchanged) so it can be tested
+    clean_text = text.lower().strip(".,!?")
+    for trigger in ["this is", "my name is", "remember as", "call her", "call him", "call this", "call it"]:
+        if trigger in clean_text:
+            return clean_text.split(trigger)[-1].strip()
+    words = clean_text.split()
+    return words[-1] if words else None
 
 def answer_voice_query(user_text):
     user_text = user_text.lower().strip()
@@ -1178,25 +1151,69 @@ def handle_event(ev):
         notifier.push(P2 if is_personal else P3, lower, text)
 
 
-# The listener (SPACE -> beep -> record -> Whisper) lives in voice_input.py.
 # Whisper hint words (whisper_prompt) come from refresh_people(): names are only
 # included for people SENSE can verify, so Whisper is not nudged into hearing a
 # name that was never said.
-mic_index, mic_note = find_mic(sr, args.mic)
-if args.mic and mic_index is None:
-    print(f"🎙️ {mic_note}. Using the default microphone.")
-print(f"🎙️ Microphone: {mic_note if mic_index is not None else (default_mic_name() or 'system default')}")
-voice = VoiceInput(sr, recognizer, voice_queue, get_prompt=lambda: whisper_prompt,
-                   play_cue=None if os.path.exists("/System/Library/Sounds/Tink.aiff")
-                   else (lambda: subprocess.run(["say", "-r", str(speech_rate), "Yes?"], timeout=3)),
-                   mic_index=mic_index)
-if not os.environ.get("SENSE_SKIP_WHISPER_PRELOAD"):
-    voice.preload()
+EARCON = "/System/Library/Sounds/Tink.aiff"   # short macOS sound: "speak now"
+WHISPER_JUNK = {"", "listening", "you", "thank you", "thanks for watching", "bye"}
+LISTEN_START_TIMEOUT_S = 5.0     # time to START speaking (as before PR #3: 4.5)
+LISTEN_MAX_PHRASE_S = 5.0        # longest question (as before PR #3). Noise can keep the
+                                 # mic "hearing speech", so this cap is the worst case.
 
+def listen_in_background():
+    """Listener thread: cue, record, transcribe. Never answers (main thread does).
 
-def trigger_voice(where="window"):
-    voice.press(where)
+    Speed fix (krish, field test 2): PR #3 waited for a spoken "Listening.",
+    then a beep, then 0.4 s of noise calibration, and allowed 8 s phrases:
+    about 1.5 s extra before the mic opened and up to 3 s extra recording.
+    Now: stop any speech, play only the short beep (~0.15 s, it has ended
+    before the mic opens, so the mic cannot hear SENSE), then record with the
+    old limits. Timings are printed so slow steps are visible.
+    """
+    global is_listening
+    is_listening = True
+    t0 = time.time()
+    try:
+        subprocess.run(["killall", "say"], stderr=subprocess.DEVNULL)
+        if os.path.exists(EARCON):
+            subprocess.run(["afplay", EARCON], timeout=2, stderr=subprocess.DEVNULL)
+        else:  # non-Mac fallback: a very short spoken cue, finished before the mic opens
+            subprocess.run(["say", "-r", str(speech_rate), "Yes?"], timeout=3)
+        with sr.Microphone() as source:
+            t_mic = time.time()
+            print(f"\n🎙️ Listening now... (mic open after {t_mic - t0:.2f}s)")
+            audio = recognizer.listen(source, timeout=LISTEN_START_TIMEOUT_S,
+                                      phrase_time_limit=LISTEN_MAX_PHRASE_S)
+        t_rec = time.time()
+        # Microphone is released before the (slower) transcription
+        text = recognizer.recognize_whisper(
+            audio,
+            model="tiny",
+            initial_prompt=whisper_prompt
+        ).strip()
+        t_done = time.time()
+        print(f"👂 Heard: '{text}'  ⏱ recorded {t_rec - t_mic:.1f}s, Whisper {t_done - t_rec:.1f}s, "
+              f"total {t_done - t0:.1f}s since space")
+        if text.lower().strip(" .!?,") in WHISPER_JUNK:
+            voice_queue.put(("error", "I didn't hear a question. Press space and speak after the beep."))
+        else:
+            # Do NOT answer here: hand the text to the main thread.
+            voice_queue.put(("text", text))
+    except sr.WaitTimeoutError:
+        voice_queue.put(("error", "I didn't hear anything. Press space and speak after the beep."))
+    except Exception as e:
+        print(f"Ear note: {e}")
+        voice_queue.put(("error", "Sorry, I had trouble hearing that."))
+    finally:
+        is_listening = False
 
+def trigger_voice():
+    global is_listening
+    if not is_listening:
+        # Set the flag BEFORE starting the thread, so a second key press
+        # can never start a second listener (keeps us at 2 threads max).
+        is_listening = True
+        threading.Thread(target=listen_in_background, daemon=True).start()
 
 def process_voice_queue():
     """Runs on the main thread: answers any transcripts the listener produced."""
@@ -1220,80 +1237,7 @@ elif unverifiable_people():
     n = len(unverifiable_people())
     startup += (f" {n} {'person was' if n == 1 else 'people were'} taught with the old clothing method. "
                 f"Please introduce them again by face.")
-for note in _startup_notes:          # e.g. "I can't find the phone camera. Using the laptop camera..."
-    startup += " " + note
 speak(startup)
-camera.announce = speak              # camera lost / back / frozen are said straight away
-
-# Keys: from the video window (cv2.waitKey) AND from the terminal SENSE was
-# started in (key_input.py). On macOS the video window often opens without
-# keyboard focus, and SPACE then went to the terminal and was lost.
-WINDOW_NAME = "SENSE Master Assistive System"
-try:
-    cv2.namedWindow(WINDOW_NAME)
-    cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_TOPMOST, 1)    # bring it to the front once
-    cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_TOPMOST, 0)
-except Exception:  # noqa: BLE001  (not supported by every OpenCV build / headless runs)
-    pass
-terminal_keys = TerminalKeys(enabled=not os.environ.get("SENSE_NO_TERMINAL_KEYS"))
-print("⌨️  Keys: SPACE = talk, C = switch camera (built-in / Camo), Q = quit. They work in the video window"
-      + (" and in this terminal." if terminal_keys.enabled else " (click it first)."))
-
-
-def handle_key(k, where):
-    """One key press from the window or the terminal. Returns True to quit."""
-    if k is None:
-        return False
-    if k in KEY_NAMES and k != ord(" "):
-        print(f"⌨️  {KEY_NAMES[k]} ({where})")
-    if k == ord("q"):
-        subprocess.run(["killall", "say"], stderr=subprocess.DEVNULL)
-        return True
-    if k == ord(" "):
-        trigger_voice(where)
-    elif k == ord("c"):
-        switch_camera()
-    return False
-
-
-def switch_camera():
-    if camera.kind not in ("builtin", "camo"):
-        speak("Camera switching works with --camera builtin or camo, not with --source.")
-        return
-    target = camera.other_kind()
-    speak("Switching to the " + ("phone camera." if target == "camo" else "laptop camera."))
-    msg = camera.switch(target)
-    if camera.kind == target:
-        memory_db.set_setting("camera_source", target)    # remembered for the next start
-    speak(msg)
-
-
-def reset_after_camera_change():
-    """A different camera or picture size: optical flow, looming and ByteTrack
-    must start fresh (old points / tracks belong to a different picture)."""
-    global p0, old_gray, last_frame_time
-    p0, old_gray, last_frame_time = None, None, None
-    looming.prev = None
-    try:
-        for tr in getattr(model.predictor, "trackers", None) or []:
-            tr.reset()
-    except Exception as e:  # noqa: BLE001
-        print(f"📷 Tracker reset note: {e}")
-    print("📷 New camera picture: motion tracking restarted.")
-
-
-def poll_keys():
-    """All keys from both places; True if SENSE should quit."""
-    quit_now = handle_key(window_key(cv2.waitKey(1)), "window")
-    for k in terminal_keys.poll():
-        quit_now = handle_key(k, "terminal") or quit_now
-    return quit_now
-
-
-NO_CAMERA_FRAME = np.zeros((360, 640, 3), np.uint8)
-cv2.putText(NO_CAMERA_FRAME, "NO CAMERA - reconnecting...", (40, 170), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-cv2.putText(NO_CAMERA_FRAME, "SPACE talk   C switch camera   Q quit", (40, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-            (200, 200, 200), 1)
 
 # =====================================================================
 # 5. MAIN REAL-TIME MULTIMODAL LOOP
@@ -1305,18 +1249,7 @@ while True:
 
     success, frame = camera.read()
     if not success:
-        if camera.is_file:
-            break                      # the recorded clip ended
-        # Live camera lost (cable, Camo, sleep): keep voice and keys working
-        # while camera.read() retries; never a busy loop (waitKey waits 30 ms).
-        cv2.imshow(WINDOW_NAME, NO_CAMERA_FRAME)
-        if handle_key(window_key(cv2.waitKey(30)), "window") or \
-                any(handle_key(k, "terminal") for k in terminal_keys.poll()):
-            break
-        continue
-    if camera.take_size_changed() or old_gray is None or old_gray.shape != frame.shape[:2]:
-        reset_after_camera_change()
-        old_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        break
 
     current_time = time.time()
     frame_height, frame_width, _ = frame.shape
@@ -1404,15 +1337,8 @@ while True:
     continuity_dets = []
 
     candidates = []
-    # Crops for "this is Sneha" / "this is my bottle" come from the last frame
-    # YOLO ran on. They used to be cleared on EVERY frame, so while the camera
-    # moved (YOLO runs on 1 frame in 3) a question was often answered with
-    # "I don't see anyone", depending on which frame it landed on.
-    if should_run_yolo or current_time - crops_time > 0.5:
-        active_people_crops.clear()
-        active_object_crops.clear()
-    if should_run_yolo:
-        crops_time = current_time
+    active_people_crops.clear()
+    active_object_crops.clear()
     frame_observations = {}   # name -> this frame's stable observation (Roadmap E2)
     enrol_candidates = []     # (eye px, track id, face embedding) while enrolling
     guide_seen = []           # confirmed sightings this frame, for "find my ..." guidance
@@ -1721,12 +1647,12 @@ while True:
 
     # Roadmap E3: speak at most one (merged) announcement, only if it matters.
     # While guiding, only safety alerts (P1) are spoken; other news waits.
-    spoken_now = notifier.tick(camera_moving=is_camera_moving, hold=voice.is_listening or guide.active)
+    spoken_now = notifier.tick(camera_moving=is_camera_moving, hold=is_listening or guide.active)
     if guide.active:
         # Guidance never talks over anything and always yields to hazards:
         # it speaks only when SENSE is silent and no safety alert is pending
         # or was said in the last 2 s.
-        can_guide = (spoken_now is None and not is_speaking() and not voice.is_listening
+        can_guide = (spoken_now is None and not is_speaking() and not is_listening
                      and notifier.safety_clear())
         cue = guide.poll(current_time, cumulative_camera_heading, can_speak=can_guide)
         if cue:
@@ -1751,7 +1677,7 @@ while True:
     if is_camera_moving:
         cv2.putText(frame, f"CAM MOVING ({heading_display})", (20, 35), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
-    elif voice.is_listening:
+    elif is_listening:
         cv2.putText(frame, "STATUS: LISTENING... SPEAK NOW!", (20, 35), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     else:
@@ -1763,9 +1689,14 @@ while True:
             cv2.rectangle(frame, (hx1, hy1), (hx2, hy2), (200, 0, 200), 2)
             cv2.putText(frame, hz_name.title(), (hx1, max(15, hy1 - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 0, 200), 2)
-    cv2.imshow(WINDOW_NAME, frame)
-    if poll_keys():
+    cv2.imshow("SENSE Master Assistive System", frame)
+
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord('q'):
+        subprocess.run(["killall", "say"], stderr=subprocess.DEVNULL)
         break
+    elif key == ord(' '):
+        trigger_voice()
 
 # The room as it was when SENSE stopped: the 'before' picture for the next run
 save_scene_snapshot(time.time(), "auto")
@@ -1776,5 +1707,4 @@ for eid, ent in resolver.entities.items():
 memory_db.close()
 
 camera.release()
-terminal_keys.restore()
 cv2.destroyAllWindows()

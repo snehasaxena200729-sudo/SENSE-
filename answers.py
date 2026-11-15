@@ -59,16 +59,6 @@ INTENT_PATTERNS = [
 ]
 
 
-def extract_name(text):
-    """'This is Sneha.' -> 'sneha' (the words after the trigger phrase)."""
-    clean_text = text.lower().strip(".,!?")
-    for trigger in ["this is", "my name is", "remember as", "call her", "call him", "call this", "call it"]:
-        if trigger in clean_text:
-            return clean_text.split(trigger)[-1].strip()
-    words = clean_text.split()
-    return words[-1] if words else None
-
-
 def classify_intent(text):
     t = text.lower().replace("\u2019", "'")     # Whisper sometimes writes I’m with a curly quote
     # "change <something> to <something>" is a rename, never a 'what changed' question
