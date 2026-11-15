@@ -937,6 +937,8 @@ def find_memory(target, now):
     relation = memory_relation(rec) if same_session and target["kind"] == "item" else None
     if relation and target["name"].split()[-1] in relation:
         relation = None      # "the bicycle, next to the yellow bicycle": the same thing twice
+    if same_session and target["kind"] == "item" and (rec.get("status") or "").upper() == "GONE":
+        where += ", but it disappeared from there, so it may have been moved"   # same honesty as "where is"
     return {"world_angle": rec.get("world_angle") if same_session else None,
             "age_text": answers.format_time_ago(now - rec["last_seen"]),
             "where": where if same_session else f"{where} at that time",
