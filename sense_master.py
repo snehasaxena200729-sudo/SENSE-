@@ -11,6 +11,11 @@ from collections import defaultdict, Counter
 import speech_recognition as sr
 from ultralytics import YOLO
 import memory_db
+import spatial
+import answers
+from identity import EntityResolver
+from events import EventTracker
+from notifier import Notifier, P1, P2, P3
 
 # =====================================================================
 # 1. INITIALIZATION & SETUP
@@ -49,6 +54,21 @@ known_objects = memory_db.load_all_custom_object_profiles()
 print(f"👥 Restored people profiles: {list(known_people.keys())}")
 print(f"📦 Restored personal items: {list(known_objects.keys())}")
 
+# --- Roadmap state (all used only by the main thread) ---
+SESSION_ID = str(int(time.time()))       # world angles are only valid within one run
+SESSION_START = time.time()
+resolver = EntityResolver(memory_db.load_entities())     # E1 stable identities
+event_tracker = EventTracker()                           # E2 debounced events
+last_db_write = {}                                       # E2 throttle: name -> time
+DB_WRITE_INTERVAL_S = 1.0
+hazard_history = defaultdict(list)                       # O1: tid -> [(time, box height)]
+last_changes_query = None                                # E6 "what changed" bookmark
+try:
+    speech_rate = int(memory_db.get_setting("speech_rate", "190"))   # O2 preference
+except ValueError:
+    speech_rate = 190
+print(f"🧩 Restored {sum(1 for e in resolver.entities.values() if e.get('name'))} stable object identities.")
+
 # System States
 live_memory = {}
 track_votes = defaultdict(list)
@@ -65,10 +85,7 @@ last_camera_move_time = 0
 # Items are tuples: ("text", transcript) or ("error", message_to_speak).
 voice_queue = queue.Queue()
 
-# Event Detection State (appear / move / vanish)
-committed_zone = {}
-zone_votes = defaultdict(list)
-previously_visible_names = set()
+# Event detection now lives in events.py (Roadmap E2).
 
 # Heading & Display Persistence Buffers
 cumulative_camera_heading = 0.0
@@ -85,7 +102,19 @@ ALLOWED_ITEMS = {
     "mouse": "mouse"
 }
 
+# Roadmap O1: obstacles the COCO-trained YOLOv8 model already recognises.
+# They are remembered like other objects and can trigger approach warnings.
+HAZARD_ITEMS = {
+    "chair": "chair", "couch": "couch", "bed": "bed", "dining table": "table",
+    "potted plant": "plant", "tv": "tv", "dog": "dog", "cat": "cat",
+    "suitcase": "suitcase", "bench": "bench", "bicycle": "bicycle",
+}
+ALLOWED_ITEMS.update(HAZARD_ITEMS)
+HAZARD_NAMES = set(HAZARD_ITEMS.values())
+
 OBJECT_REAL_SIZES_CM = {
+    "chair": 90.0, "couch": 85.0, "bed": 60.0, "table": 75.0, "plant": 50.0,
+    "tv": 60.0, "dog": 50.0, "cat": 30.0, "suitcase": 60.0, "bench": 80.0, "bicycle": 100.0,
     "phone": 15.0,
     "remote": 18.0,
     "bottle": 23.0,
@@ -98,10 +127,20 @@ OBJECT_REAL_SIZES_CM = {
 # =====================================================================
 # 2. AUDIO & 360-DEGREE SPATIAL COMPASS HELPERS
 # =====================================================================
+speech_process = None
+
 def speak(message):
+    global speech_process
     subprocess.run(["killall", "say"], stderr=subprocess.DEVNULL)
     print(f"\n🔊 SENSE: '{message}'")
-    subprocess.Popen(["say", "-r", "190", message])
+    speech_process = subprocess.Popen(["say", "-r", str(speech_rate), message])
+
+def is_speaking():
+    """True while the last `say` process is still talking (non-blocking check)."""
+    return speech_process is not None and speech_process.poll() is None
+
+# Roadmap E3: decides which events are worth saying out loud.
+notifier = Notifier(speak, is_speaking, level=memory_db.get_setting("notify_level", "normal"))
 
 def get_spatial_zone_from_x(x_coordinate, frame_width=640):
     third = frame_width / 3.0
@@ -283,7 +322,10 @@ def learn_person(name):
         cx = int((box[0] + box[2]) / 2)
         cy = int((box[1] + box[3]) / 2)
         zone = get_spatial_zone_from_x(cx, target_data["frame_width"])
-        memory_db.save_object_observation(clean_name.lower(), zone, cx, cy, status="VISIBLE")
+        memory_db.save_object_observation(
+            clean_name.lower(), zone, cx, cy, status="VISIBLE",
+            world_angle=spatial.world_angle(cx, target_data["frame_width"], cumulative_camera_heading),
+            session_id=SESSION_ID)
 
         speak(f"Got it. I have permanently memorized {clean_name}.")
         print(f"✨ Successfully memorized: {clean_name}")
@@ -320,9 +362,17 @@ def learn_custom_object(custom_name):
     sig = get_unified_chroma_signature(crop)
     if sig is not None:
         known_objects[clean_name] = {"category": base_cat, "sig": sig}
+        # Roadmap E1/E2: the track had a generic name ("White Bottle"); retire it so
+        # the renamed object does not also produce a false "gone" event.
+        old_eid = resolver.track_to_entity.get(target_tid)
+        old_name = resolver.name_of(old_eid) if old_eid else None
+        if old_name:
+            event_tracker.items.pop(old_name.title(), None)
+            live_memory.pop(old_name.title(), None)
         track_locked_identities[target_tid] = clean_name.title()
         memory_db.save_custom_object_profile(clean_name, base_cat, sig)
-        speak(f"Got it. I have permanently memorized your {clean_name}.")
+        item_words = clean_name[3:] if clean_name.startswith("my ") else clean_name
+        speak(f"Got it. I have permanently memorized your {item_words}.")
         print(f"📦 Successfully memorized item: '{clean_name}' as a {base_cat}!")
     else:
         speak("Could not capture the object clearly. Please try again.")
@@ -351,9 +401,11 @@ def answer_voice_query(user_text):
     user_text = user_text.lower().strip()
     print(f"👂 Transcribed: '{user_text}'")
     current_time = time.time()
+    intent = answers.classify_intent(user_text)   # Roadmap E6 (rule-based, offline)
+    print(f"🧭 Intent: {intent}")
 
     # Intent A: Name Learning ("This is Sneha", "This is my water bottle")
-    if any(phrase in user_text for phrase in ["this is", "my name is", "remember as", "call this", "call it"]):
+    if intent == "LEARN":
         extracted = extract_name_from_speech(user_text)
         if not extracted:
             speak("I didn't catch the name.")
@@ -367,8 +419,27 @@ def answer_voice_query(user_text):
             learn_person(extracted.capitalize())
         return
 
-    # Intent B: Room Overview ("What do you see?")
-    if any(phrase in user_text for phrase in ["what do you see", "room", "everything", "around me"]):
+    # Roadmap E6 / O2: privacy and preference commands
+    if intent == "FORGET":
+        forget_command(user_text)
+        return
+    if intent in ("QUIET", "VERBOSE", "NORMAL"):
+        level = {"QUIET": "quiet", "VERBOSE": "verbose", "NORMAL": "normal"}[intent]
+        notifier.set_level(level)
+        memory_db.set_setting("notify_level", level)
+        speak({"quiet": "Quiet mode. I will only warn you about obstacles.",
+               "verbose": "Okay, I will tell you about every change I notice.",
+               "normal": "Normal mode. I will tell you about your items and people you know."}[level])
+        return
+    if intent in ("SLOWER", "FASTER"):
+        global speech_rate
+        speech_rate = max(130, min(260, speech_rate + (-30 if intent == "SLOWER" else 30)))
+        memory_db.set_setting("speech_rate", speech_rate)
+        speak("Okay, I will speak slower." if intent == "SLOWER" else "Okay, I will speak faster.")
+        return
+
+    # Intent B: Room Overview ("What do you see?") - what is visible right now
+    if intent == "OVERVIEW":
         active_items = []
         for name, data in live_memory.items():
             if current_time - data["last_seen"] <= 2.5:
@@ -380,73 +451,279 @@ def answer_voice_query(user_text):
             speak("Currently, I see " + " and ".join(active_items) + ".")
         return
 
-    # Intent C: Specific Target Search ("Where is my water bottle?", "Where is red bottle?", "Where is Sneha?")
-    found_target = None
-    all_searchable = list(known_objects.keys()) + list(known_people.keys()) + list(ALLOWED_ITEMS.values())
+    # Roadmap E6: memory conversations
+    if intent == "CHANGES":
+        answer_changes(current_time)
+        return
+    if intent == "WHO":
+        answer_who(current_time)
+        return
+    if intent == "RECENT":
+        answer_recent(current_time)
+        return
 
-    if "neha" in user_text or "sneha" in user_text:
-        found_target = "Sneha"
-    elif "mummy" in user_text or "mom" in user_text:
-        found_target = "Mummy"
-    else:
-        for item in all_searchable:
-            if item.lower() in user_text:
-                found_target = item.title()
-                break
-
-    # Color-based fallback search (e.g., "Where is red bottle?")
-    if not found_target:
-        for live_name in live_memory.keys():
-            if any(word in user_text for word in live_name.lower().split()):
-                found_target = live_name
-                break
-
-    if not found_target:
-        for word in user_text.split():
-            clean_w = word.strip(".,!?")
-            if clean_w in STOPWORDS:
-                continue
-            if memory_db.get_object_memory(clean_w) is not None:
-                found_target = clean_w.title()
-                break
-
+    # Intents WHERE / WHEN / PREVIOUS need a target item or person
+    found_target = find_target(user_text)
     if not found_target:
         speak("I heard you, but I did not catch which item or person you asked about.")
         return
 
-    # 1. Live Check
+    if intent == "PREVIOUS":
+        answer_previous(found_target, current_time)
+        return
+
+    # 1. Live Check ("I can see it right now")
     live_matches = [name for name in live_memory if found_target.lower() in name.lower() and (current_time - live_memory[name]["last_seen"] <= 2.5)]
     if live_matches:
         announcements = []
         for m in live_matches:
             d = live_memory[m]
-            announcements.append(f"{m} {d['last_zone']}, {d['dist_phrase']}")
-        speak("I see " + " and ".join(announcements) + ".")
+            rel = live_relation(m)
+            announcements.append(f"{m} {d['last_zone']}, {d['dist_phrase']}" + (f", {rel}" if rel else ""))
+        prefix = "Right now, I see " if intent == "WHEN" else "I see "
+        speak(prefix + " and ".join(announcements) + ".")
         return
 
-    # 2. Database + 360-Degree World Compass Transformation
-    db_record = memory_db.get_object_memory(found_target.lower())
-    if db_record is not None:
-        time_elapsed = current_time - db_record["last_seen"]
-        time_str = format_time_ago(time_elapsed)
-        original_zone = db_record["last_zone"]
-
-        corrected_zone = calculate_world_relative_direction(original_zone, cumulative_camera_heading)
-
-        if abs(cumulative_camera_heading) > 25:
-            if abs(cumulative_camera_heading) > 135:
-                turn_desc = "turned around"
-            elif cumulative_camera_heading < 0:
-                turn_desc = "turned left"
-            else:
-                turn_desc = "turned right"
-
-            pronoun = "they" if (found_target.lower() in [p.lower() for p in known_people.keys()] or found_target.lower() in ["mummy", "sneha"]) else "it"
-            speak(f"{found_target} was last seen {original_zone} {time_str}. But since you {turn_desc}, {pronoun} should now be {corrected_zone}.")
-        else:
-            speak(f"{found_target} was last seen {original_zone}, {time_str}.")
-    else:
+    # 2. Memory: newest matching record, world-anchored and uncertainty-aware (E4 + E5)
+    db_record = memory_db.find_latest_memory(found_target)
+    if db_record is None:
         speak(f"I have no record of {found_target} in my memory database.")
+        return
+    name = spoken_name(db_record["name"])
+    age = current_time - db_record["last_seen"]
+    if intent == "WHEN":
+        speak(f"I last saw {name} {answers.format_time_ago(age)}, {db_record['last_zone']}.")
+        return
+    where, turn_hint, same_session = location_words(db_record)
+    relation = memory_relation(db_record) if same_session else None
+    sentence, level, score = answers.describe_memory(
+        name, age, db_record.get("status"), where, same_session, turn_hint, relation)
+    print(f"🎯 Confidence {score:.2f} ({level})")
+    speak(sentence[0].upper() + sentence[1:])
+
+
+# ---------------------------------------------------------------------
+# Roadmap helpers: names, locations, relations, memory answers
+# ---------------------------------------------------------------------
+def spoken_name(name):
+    """'my bottle' -> 'your bottle', 'white cup' -> 'the white cup', 'sneha' -> 'Sneha'."""
+    lower = name.lower()
+    if lower in {p.lower() for p in known_people}:
+        return name.capitalize()
+    if lower.startswith("my "):
+        return "your " + lower[3:]
+    return "the " + lower
+
+
+def find_target(user_text):
+    if "neha" in user_text or "sneha" in user_text:
+        return "Sneha"
+    if "mummy" in user_text or "mom" in user_text:
+        return "Mummy"
+    candidates = set(known_objects.keys()) | {p.lower() for p in known_people}
+    candidates |= set(ALLOWED_ITEMS.values())
+    candidates |= {n.lower() for n in live_memory if n not in ("Unfamiliar Person", "Person")}
+    candidates |= set(memory_db.get_all_memory_names())
+    match = answers.fuzzy_find(user_text, sorted(candidates))   # tolerant of mishearing
+    return match.title() if match else None
+
+
+def location_words(rec):
+    """Where is a remembered thing NOW, relative to the user? (Roadmap E4)"""
+    if rec.get("session_id") == SESSION_ID and rec.get("world_angle") is not None:
+        rel = spatial.relative_angle(rec["world_angle"], cumulative_camera_heading)
+        return spatial.direction_phrase(rel), spatial.turn_instruction(rel), True
+    # Seen in an earlier run: the heading was reset, so only the old zone is known
+    return rec["last_zone"], None, False
+
+
+def _relation_candidates(exclude):
+    people = {p.lower() for p in known_people}
+    out = []
+    now = time.time()
+    for n, d in live_memory.items():
+        if now - d["last_seen"] > 2.5:      # only things visible right now
+            continue
+        if n.lower() == exclude.lower() or n in ("Unfamiliar Person", "Person") or n.lower() in people:
+            continue
+        out.append({"name": n.lower(), "world_angle": d.get("world_angle"),
+                    "last_y": d.get("last_y"), "last_seen": d["last_seen"]})
+    return out
+
+
+def live_relation(name):
+    d = live_memory.get(name)
+    if not d or d.get("category") == "person" or name.lower() in {p.lower() for p in known_people}:
+        return None
+    target = {"name": name.lower(), "world_angle": d.get("world_angle"),
+              "last_y": d.get("last_y"), "last_seen": d["last_seen"]}
+    return spatial.relation_phrase(target, spatial.nearest_neighbour(target, _relation_candidates(name)))
+
+
+def memory_relation(rec):
+    if rec["name"] in {p.lower() for p in known_people}:
+        return None
+    target = {"name": rec["name"], "world_angle": rec.get("world_angle"),
+              "last_y": rec.get("last_y"), "last_seen": rec["last_seen"]}
+    others = [{"name": r["name"], "world_angle": r.get("world_angle"), "last_y": r.get("last_y"),
+               "last_seen": r["last_seen"]}
+              for r in memory_db.get_memories_seen_since(rec["last_seen"] - 30)
+              if r.get("session_id") == SESSION_ID and r["name"] not in {p.lower() for p in known_people}]
+    return spatial.relation_phrase(target, spatial.nearest_neighbour(target, others))
+
+
+def answer_changes(current_time):
+    """'What changed?' - events since the last time you asked (max 30 minutes back)."""
+    global last_changes_query
+    since = current_time - 1800
+    if last_changes_query is not None:
+        since = max(since, last_changes_query)
+    events_list = [ev for ev in memory_db.get_events_since(since)
+                   if ev["type"] in ("MOVED", "GONE")
+                   or (ev["type"] == "RETURNED" and ev.get("detail"))
+                   or (ev["type"] == "APPEARED" and ev["ts"] > SESSION_START + 15)]
+    for ev in events_list:
+        ev["name"] = spoken_name(ev["name"])
+        if ev["type"] == "RETURNED":
+            ev["type"] = "MOVED"   # came back somewhere else = it was moved
+    last_changes_query = current_time
+    summary = answers.summarise_changes(events_list)
+    speak(summary[0].upper() + summary[1:])
+
+
+def answer_who(current_time):
+    """'Who was here?' - known people seen today, newest first."""
+    lt = time.localtime(current_time)
+    midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+    people = {p.lower(): p for p in known_people}
+    seen = [r for r in memory_db.get_memories_seen_since(midnight) if r["name"] in people]
+    if not seen:
+        speak("I have not recognised anyone I know today.")
+        return
+    parts = []
+    for r in seen:
+        age = current_time - r["last_seen"]
+        if age <= 2.5:
+            parts.append(f"{people[r['name']]}, who is here right now")
+        else:
+            parts.append(f"{people[r['name']]}, last seen {answers.format_time_ago(age)}")
+    speak("Today I saw " + " and ".join(parts) + ".")
+
+
+def answer_recent(current_time):
+    """'What did you see?' - things seen in the last 10 minutes that are not visible now."""
+    recent = [r for r in memory_db.get_memories_seen_since(current_time - 600)
+              if current_time - r["last_seen"] > 2.5]
+    if not recent:
+        speak("I have not seen anything else in the last ten minutes.")
+        return
+    parts = [f"{spoken_name(r['name'])} {answers.format_time_ago(current_time - r['last_seen'])}"
+             for r in recent[:5]]
+    speak("In the last ten minutes I also saw " + ", ".join(parts) + ".")
+
+
+def answer_previous(found_target, current_time):
+    """'Where was my bottle before?' - uses the event history (Roadmap E2/E6)."""
+    history = memory_db.get_item_history(found_target)
+    for ev in history:
+        if ev["type"] in ("MOVED", "RETURNED") and ev.get("detail"):
+            name = spoken_name(ev["name"])
+            speak(f"Before it was moved {answers.format_time_ago(current_time - ev['ts'])}, "
+                  f"{name} was {ev['detail'].replace('from ', '')}. Now it is {ev['zone']}.")
+            return
+    if history:
+        speak(f"I have not seen {spoken_name(history[0]['name'])} move. "
+              f"It was {history[0]['zone']} when I last noticed it.")
+    else:
+        speak(f"I have no history for {found_target}.")
+
+
+def forget_command(user_text):
+    """Privacy: 'forget Sneha' / 'forget my bottle' deletes profile, memory and history."""
+    candidates = set(known_objects.keys()) | {p.lower() for p in known_people} | set(memory_db.get_all_memory_names())
+    target = answers.fuzzy_find(user_text.replace("forget", " "), sorted(candidates))
+    if not target:
+        speak("Tell me who or what to forget, for example: forget my bottle.")
+        return
+    memory_db.forget(target)
+    for store in (known_people,):
+        for k in list(store):
+            if k.lower() == target.lower():
+                del store[k]
+    known_objects.pop(target.lower(), None)
+    for k in list(live_memory):
+        if k.lower() == target.lower():
+            del live_memory[k]
+    for tid in [t for t, n in track_locked_identities.items() if n.lower() == target.lower()]:
+        del track_locked_identities[tid]
+    for k in list(event_tracker.items):
+        if k.lower() == target.lower():
+            del event_tracker.items[k]
+    speak(f"Done. I have forgotten {target}.")
+
+
+def handle_event(ev):
+    """Log an event to SQLite and decide whether it is worth saying (Roadmap E2 + E3)."""
+    name, kind = ev["name"], ev["type"]
+    detail = f"from {ev['from_zone']}" if ev.get("from_zone") else None
+    memory_db.log_event(ev["ts"], name, kind, ev.get("zone"), ev.get("world_angle"),
+                        SESSION_ID, ev.get("dist_feet"), detail)
+    icon = {"APPEARED": "🆕", "MOVED": "↔️", "GONE": "📤", "OUT_OF_VIEW": "🙈", "RETURNED": "👋"}.get(kind, "•")
+    print(f"{icon} {kind}: '{name}' {ev.get('zone') or ''} {detail or ''}".rstrip())
+    if kind in ("GONE", "OUT_OF_VIEW"):
+        memory_db.set_object_status(name, kind)
+
+    lower = name.lower()
+    is_person = lower in {p.lower() for p in known_people}
+    is_personal = is_person or lower in known_objects
+    if ev.get("world_angle") is not None:
+        where = spatial.direction_phrase(spatial.relative_angle(ev["world_angle"], cumulative_camera_heading))
+    else:
+        where = ev.get("zone") or ""
+    label = spoken_name(name)
+    label = label[0].upper() + label[1:]
+
+    text = None
+    if is_person:
+        if kind in ("APPEARED", "RETURNED"):
+            text = f"{label} is here, {where}"
+        elif kind == "GONE":
+            text = f"{label} has left"
+    else:
+        if kind == "MOVED" or (kind == "RETURNED" and ev.get("from_zone")):
+            text = f"{label} was moved. It is now {where}"
+        elif kind == "GONE":
+            text = f"{label} is no longer {where}"
+        elif kind == "APPEARED":
+            text = f"I see {spoken_name(name)} {where}"
+    if text:
+        notifier.push(P2 if is_personal else P3, lower, text)
+
+
+def check_hazard(tid, display_name, category, box_h, dist_feet, center_x, frame_width, now):
+    """Roadmap O1: warn when an obstacle or person is ahead AND getting closer.
+
+    'Getting closer' = the box grew by more than 15% within about half a second
+    (looming). Requiring growth avoids nagging about furniture that simply
+    sits near a stationary camera.
+    """
+    hist = hazard_history[tid]
+    hist.append((now, box_h))
+    while hist and now - hist[0][0] > 1.0:
+        hist.pop(0)
+    old = [h for t, h in hist if now - t >= 0.4]
+    if not old:
+        return
+    growth = box_h / max(1.0, old[-1])
+    ahead = abs(spatial.pixel_to_angle(center_x, frame_width)) < 15
+    if ahead and dist_feet < 5.0 and growth > 1.15:
+        if category == "person":
+            who = display_name if display_name not in ("Unfamiliar Person", "Person") else "someone"
+            text = f"Careful, {who} is coming towards you, {format_distance(dist_feet)}"
+        else:
+            text = f"Careful, {category} ahead, {format_distance(dist_feet)}"
+        notifier.push(P1, f"hazard:{tid}", text)
+
 
 def listen_in_background():
     global is_listening
@@ -575,7 +852,7 @@ while True:
     candidates = []
     active_people_crops.clear()
     active_object_crops.clear()
-    currently_visible_names = set()
+    frame_observations = {}   # name -> this frame's stable observation (Roadmap E2)
 
     if boxes is not None and boxes.id is not None:
         for box in boxes:
@@ -629,6 +906,7 @@ while True:
         # Instant lock-on within 2 frames!
         if len(track_votes[tid]) >= 2:
             winner_name, _ = Counter(track_votes[tid]).most_common(1)[0]
+            entity_settled = True   # becomes False while a new object's colour is still being voted
             x1, y1, x2, y2 = cand["box"]
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(frame_width, x2), min(frame_height, y2)
@@ -713,44 +991,28 @@ while True:
                         track_locked_identities[tid] = display_name
                         is_custom_item = True
                     else:
-                        color_prefix = get_dominant_color_name(crop)
-                        if color_prefix:
-                            display_name = f"{color_prefix.capitalize()} {winner_name.capitalize()}"
-                        else:
-                            display_name = winner_name.capitalize()
+                        # Roadmap E1: stable identity. Colour is voted over many
+                        # frames and the name is frozen once settled, so one
+                        # physical object keeps ONE memory record (identity.py).
+                        sig = get_unified_chroma_signature(crop) if crop.size > 0 else None
+                        color_now = get_dominant_color_name(crop) if crop.size > 0 else ""
+                        eid = resolver.resolve(tid, winner_name, sig, color_now,
+                                               (center_x, center_y), current_time,
+                                               learn=camera_is_stable)
+                        display_name = resolver.display_label(eid, winner_name) if eid else winner_name.capitalize()
+                        entity_settled = eid is not None and resolver.name_of(eid) is not None
 
             dist_phrase = format_distance(dist_feet)
 
-            # Update Live Memory & SQLite (+ Event Detection: appear / move)
+            # Roadmap O1: obstacle / approach warning. Runs on fresh YOLO frames
+            # even while the camera moves (the user may be walking).
+            if should_run_yolo and (winner_name in HAZARD_NAMES or winner_name == "person"):
+                check_hazard(tid, display_name, winner_name, h_px, dist_feet, center_x, frame_width, current_time)
+
+            # Update Live Memory (Roadmap E4: every observation gets a WORLD angle)
             if camera_is_stable:
-                is_trackable = display_name not in ["Unfamiliar Person", "Person"]
-                event_status = "VISIBLE"
-
-                if is_trackable:
-                    currently_visible_names.add(display_name)
-                    was_away = (display_name not in live_memory) or \
-                               (current_time - live_memory[display_name]["last_seen"] > 2.5)
-
-                    if display_name not in committed_zone:
-                        committed_zone[display_name] = zone
-                        zone_votes[display_name] = []
-                        print(f"🆕 NEW: '{display_name}' first seen {zone}.")
-                    elif was_away:
-                        committed_zone[display_name] = zone
-                        zone_votes[display_name] = []
-                        print(f"👋 BACK: '{display_name}' reappeared {zone}.")
-                    else:
-                        # Require 4/5 consistent frames before trusting a zone change,
-                        # so a box jittering near a left/center/right boundary doesn't
-                        # register as a false "moved" event.
-                        zone_votes[display_name].append(zone)
-                        if len(zone_votes[display_name]) > 5:
-                            zone_votes[display_name].pop(0)
-                        majority_zone, vote_count = Counter(zone_votes[display_name]).most_common(1)[0]
-                        if majority_zone != committed_zone[display_name] and vote_count >= 4:
-                            print(f"↔️ MOVED: '{display_name}' shifted from {committed_zone[display_name]} to {majority_zone}.")
-                            committed_zone[display_name] = majority_zone
-                            event_status = "MOVED"
+                is_trackable = display_name not in ["Unfamiliar Person", "Person"] and entity_settled
+                obs_angle = spatial.world_angle(center_x, frame_width, cumulative_camera_heading)
 
                 live_memory[display_name] = {
                     "last_zone": zone,
@@ -758,17 +1020,17 @@ while True:
                     "dist_feet": dist_feet,
                     "dist_phrase": dist_phrase,
                     "last_x": center_x,
-                    "last_y": center_y
+                    "last_y": center_y,
+                    "world_angle": obs_angle,
+                    "category": winner_name,
                 }
 
                 if is_trackable:
-                    memory_db.save_object_observation(
-                        display_name.lower(),
-                        zone,
-                        center_x,
-                        center_y,
-                        status=event_status
-                    )
+                    # Events and SQLite writes happen once per frame below (E2)
+                    frame_observations[display_name] = {
+                        "zone": zone, "world_angle": obs_angle,
+                        "x": center_x, "y": center_y, "dist_feet": dist_feet,
+                    }
 
             # Visual Rendering
             if is_custom_item:
@@ -791,29 +1053,41 @@ while True:
             )
 
     # -------------------------------------------------------------
-    # SUB-SYSTEM D.1: VANISH DETECTION
-    # Only runs on stable frames: if the camera itself is panning,
-    # "not detected this frame" just means "out of view right now",
-    # not "actually gone" -- comparing two stable snapshots avoids
-    # that false positive. Note: panning away and back will still
-    # register a GONE event if the item isn't in the new field of
-    # view, since a single camera can't tell "removed" from
-    # "outside current view" -- a known limitation for now.
+    # SUB-SYSTEM D.1: EVENTS, MEMORY WRITES & NOTIFICATIONS (Roadmap E2/E3)
+    # The state machine in events.py waits GONE_AFTER_S before declaring
+    # an item gone, and tells "gone" apart from "you turned away"
+    # (OUT_OF_VIEW) using the heading. SQLite is written on events, and
+    # otherwise at most once per second per item (was: every frame).
     # -------------------------------------------------------------
+    new_events = event_tracker.update(frame_observations, current_time,
+                                      camera_is_stable, cumulative_camera_heading)
+    moved_now = set()
+    for ev in new_events:
+        handle_event(ev)
+        if ev["type"] == "MOVED":
+            moved_now.add(ev["name"])
+
     if camera_is_stable:
-        vanished_names = previously_visible_names - currently_visible_names
-        for name in vanished_names:
-            if name in live_memory:
-                last = live_memory[name]
-                print(f"📤 GONE: '{name}' is no longer visible (last seen {last['last_zone']}).")
+        event_names = {ev["name"] for ev in new_events}
+        for name, obs in frame_observations.items():
+            if name in event_names or current_time - last_db_write.get(name, 0) >= DB_WRITE_INTERVAL_S:
                 memory_db.save_object_observation(
-                    name.lower(),
-                    last["last_zone"],
-                    last.get("last_x", 0),
-                    last.get("last_y", 0),
-                    status="MISSING"
-                )
-        previously_visible_names = currently_visible_names
+                    name.lower(), obs["zone"], obs["x"], obs["y"],
+                    status="MOVED" if name in moved_now else "VISIBLE",
+                    world_angle=obs["world_angle"], session_id=SESSION_ID,
+                    dist_feet=obs["dist_feet"], seen_at=current_time)
+                last_db_write[name] = current_time
+
+    # Persist newly named object identities (rare) and free old track buffers
+    for eid, ent in resolver.pop_dirty():
+        if ent.get("name"):
+            memory_db.save_entity(eid, ent["name"], ent["category"], ent["color"], ent["sig"], ent["last_seen"])
+    resolver.prune_tracks(current_time)
+    for old_tid in [t for t, hist in hazard_history.items() if not hist or current_time - hist[-1][0] > 5]:
+        del hazard_history[old_tid]
+
+    # Roadmap E3: speak at most one (merged) announcement, only if it matters
+    notifier.tick(camera_moving=is_camera_moving)
 
     # -------------------------------------------------------------
     # SUB-SYSTEM E: HEADS-UP DISPLAY (HUD)
@@ -837,6 +1111,12 @@ while True:
         break
     elif key == ord(' '):
         trigger_voice()
+
+# Save the learned appearance of every named object identity, then close the DB
+for eid, ent in resolver.entities.items():
+    if ent.get("name"):
+        memory_db.save_entity(eid, ent["name"], ent["category"], ent["color"], ent["sig"], ent["last_seen"])
+memory_db.close()
 
 camera.release()
 cv2.destroyAllWindows()
