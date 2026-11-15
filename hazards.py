@@ -139,15 +139,19 @@ class SceneHazardDetector:
     towards it) or suddenly fills the view.
     """
     HAZARD_NAMES = ("door", "stairs")
+    HANDLE = "door handle"  # audit fix 3: the most distinctive part of a plain white door
     EVERY_N = 5
     IMG_SIZE = 640          # field test 3: 480 px missed doors; the model was trained at 640
-    MIN_CONF = 0.25         # field test 3: doors score low with the nano model
+    MIN_CONF = 0.25         # a door or stairs box on its own must score at least this
+    WEAK_DOOR_CONF = 0.10   # a weaker door box counts only if a handle sits inside it
+    HANDLE_CONF = 0.30      # a handle on its own -> "door handle" (honest: that is what was seen)
     ANNOUNCE_AGAIN_S = 10.0 # say "door ahead" again only after it was out of view this long
     VISIBLE_S = 2.5         # how long a sighting counts as "visible now"
 
     def __init__(self, model):
         self.model = model
-        self.class_ids = {i: n.lower() for i, n in model.names.items() if n.lower() in self.HAZARD_NAMES}
+        self.class_ids = {i: n.lower() for i, n in model.names.items()
+                          if n.lower() in self.HAZARD_NAMES + (self.HANDLE,)}
         self.approach = ApproachTracker()
         self.approach.WINDOW_S = 1.2   # we only sample every EVERY_N frames
         self.boxes = []          # last result, for the HUD: (name, x1, y1, x2, y2)
@@ -158,20 +162,56 @@ class SceneHazardDetector:
         """{name: angle} for doors/stairs seen in the last VISIBLE_S seconds."""
         return {n: d["angle"] for n, d in self.seen.items() if now - d["time"] <= self.VISIBLE_S}
 
+    @staticmethod
+    def _inside(handle, door, slack=0.15):
+        """Is the handle's centre inside the door box (with a little slack)?"""
+        hx, hy = (handle[0] + handle[2]) / 2, (handle[1] + handle[3]) / 2
+        dw, dh = door[2] - door[0], door[3] - door[1]
+        return (door[0] - slack * dw <= hx <= door[2] + slack * dw
+                and door[1] - slack * dh <= hy <= door[3] + slack * dh)
+
+    def filter_detections(self, raw):
+        """raw: [(name, conf, (x1, y1, x2, y2))] straight from the model.
+
+        Returns accepted [(name, conf, box)]. Rules (audit fix 3):
+          * door / stairs at MIN_CONF or more: accepted
+          * a weaker door (WEAK_DOOR_CONF..MIN_CONF): accepted only if a door
+            handle (HANDLE_CONF+) sits inside it - two independent clues agree
+          * a confident handle with no accepted door around it: reported as a
+            "door handle", because that is all the model actually saw
+        """
+        handles = [(c, b) for n, c, b in raw if n == self.HANDLE and c >= self.HANDLE_CONF]
+        out, doors = [], []
+        for name, conf, box in raw:
+            if name == self.HANDLE:
+                continue
+            has_handle = name == "door" and any(self._inside(b, box) for _, b in handles)
+            if conf >= self.MIN_CONF or (has_handle and conf >= self.WEAK_DOOR_CONF):
+                out.append((name, conf, box))
+                if name == "door":
+                    doors.append(box)
+        for conf, box in handles:
+            if not any(self._inside(box, d) for d in doors):
+                out.append((self.HANDLE, conf, box))
+        return out
+
     def update(self, frame, frame_count, now):
         """Returns a list of (key, text) warnings (usually empty)."""
         if not self.class_ids or frame_count % self.EVERY_N:
             return []
-        res = self.model.predict(frame, classes=list(self.class_ids), conf=self.MIN_CONF,
+        res = self.model.predict(frame, classes=list(self.class_ids), conf=self.WEAK_DOOR_CONF,
                                  imgsz=self.IMG_SIZE, verbose=False)
         frame_h, frame_w = frame.shape[:2]
-        self.boxes, best = [], {}
+        raw = []
         for box in (res[0].boxes if res and res[0].boxes is not None else []):
             name = self.class_ids.get(int(box.cls[0]))
             if name is None:
                 continue
             x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
             conf = float(box.conf[0]) if getattr(box, "conf", None) is not None else 0.0
+            raw.append((name, conf, (x1, y1, x2, y2)))
+        self.boxes, best = [], {}
+        for name, conf, (x1, y1, x2, y2) in self.filter_detections(raw):
             self.boxes.append((name, x1, y1, x2, y2))
             angle = spatial.pixel_to_angle((x1 + x2) / 2, frame_w)
             # per class keep the box closest to straight ahead
@@ -186,11 +226,12 @@ class SceneHazardDetector:
                 alerts.append(("new:" + name, f"{name.capitalize()} {spatial.direction_phrase(angle)}"
                                + (", very close" if frac > 0.7 else "")))
             self.seen[name] = {"time": now, "angle": angle, "frac": frac, "conf": conf}
-            if self.approach.update("scene:" + name, now, box_h, frame_h, angle):
+            if name != self.HANDLE and self.approach.update("scene:" + name, now, box_h, frame_h, angle):
                 alerts.append(("scene:" + name, f"Careful, {name} right in front of you"))
-        if best and now - self._last_log >= 1.0:   # diagnostics, at most once a second
+        if raw and now - self._last_log >= 1.0:   # diagnostics, at most once a second
             self._last_log = now
-            print("🚪 Seen: " + ", ".join(f"{n} conf {c:.2f}, {h / frame_h:.0%} of view, {a:+.0f} deg"
-                                         for n, (h, a, c) in best.items()))
+            kept = {(n, b) for n, _, b in self.filter_detections(raw)}
+            print("🚪 Candidates: " + ", ".join(
+                f"{n} {c:.2f}{'' if (n, b) in kept else ' (rejected)'}" for n, c, b in raw))
         self.approach.prune(now)
         return alerts

@@ -19,8 +19,8 @@ python sense_master.py --source clip.mp4   # replay a recorded video (repeatable
 Press **space** to talk and **q** to quit. SENSE beeps; start speaking after the beep. You have
 about 5 seconds to start and 5 seconds to speak. The terminal prints how long each step took.
 
-The first run needs internet once, to download the Whisper `tiny` model, the door/stairs model (and `lap` if it's
-missing). After that SENSE works fully offline.
+The first run needs internet once, to download the Whisper `tiny` model, the door/stairs model, the two face
+models (YuNet 0.2 MB + SFace 37 MB, checksum-verified, into `models/`) (and `lap` if it's missing). After that SENSE works fully offline.
 
 ## What you can say
 
@@ -31,9 +31,10 @@ missing). After that SENSE works fully offline.
 | "What changed?" | Summarises what moved, disappeared or appeared since you last asked (max 30 minutes back) |
 | "Where was my bottle before?" | Uses the event history to say where it was before it moved |
 | "When did you last see my keys?" | Gives the time of the last sighting |
-| "Who was here today?" | Lists known people seen today |
+| "Who was here today?" | Lists people recognised **by face** today |
 | "What did you see?" | Lists things seen in the last 10 minutes that are not visible now |
-| "This is Sneha" / "This is my water bottle" | Teaches a person or a personal item |
+| "This is my water bottle" | Teaches a personal item |
+| "This is Sneha" | Learns Sneha's **face** (look at the camera for about 2 seconds). Everyone else stays "a person" |
 | "Rename my bottle to my medicine" / "Change my bottle to medicine" | Renames a taught item or person; it keeps its look, place and history |
 | "Forget my bottle" / "Forget Sneha" | Deletes the profile, memory and history (privacy) |
 | "Be quiet" / "Normal mode" / "Talk more" | Changes the alert level (saved between runs) |
@@ -59,6 +60,9 @@ SENSE also speaks **on its own**:
 | `spatial.py` | **World-anchored directions** (stored angle + heading), turn instructions, nearby-object relations |
 | `answers.py` | **Intents, fuzzy name matching, confidence scoring** (confirmed / likely / uncertain) and wording |
 | `hazards.py` | **Sudden-obstacle warnings:** time-to-contact from optical-flow divergence (any textured object) and box-growth checks for every YOLO class |
+| `distance.py` | **Monocular distance with error ranges.** Focal length from resolution (or calibration), cut-off box detection, coarse spoken bands |
+| `face_id.py` | **Face identity.** OpenCV YuNet finds the face, SFace turns it into 128 numbers; a name needs cosine similarity >= 0.363, a margin over everyone else, and a good frontal face. Enrolment collects 5 samples without blocking |
+| `people.py` | **Person naming gate.** Detection (YOLO) and tracking (ByteTrack) never say who someone is; a name is spoken only after a verified identity check agrees 3 of the last 5 times |
 | `memory_db.py` | SQLite tables: `environmental_memory` (latest state), `events` (history), `entities`, people and personal-item profiles, `settings` |
 | `tests/` | Unit tests: `python -m unittest discover -s tests -v` |
 
@@ -76,6 +80,21 @@ Speech output is a separate `say` *process*, not a thread. Threads that librarie
 internally (PyTorch, OpenCV, PortAudio) are not managed by the app.
 
 ## Known limitations
+
+- **Distances are coarse on purpose.** One camera cannot measure depth; SENSE infers it from an
+  assumed size (eye spacing, body height, typical object size), so it speaks a range such as
+  "about 4 to 6 feet away", "within arm's reach", "closer than about 7 feet" (when you are cut
+  off by the frame edge) or "distance unclear". Calibrate your camera once and check the error
+  with a tape measure: `python tools/validate_distance.py --live --person-height 1.70 --save`.
+- **Doors are the weakest detection.** The main model (COCO) has no door class. The Open Images model
+  does, but in synthetic tests a flush white door with a faint frame scored under 0.15, and a door cut
+  off at the top scored near 0. A door handle inside a weak door box now counts as evidence. Measure
+  your own door with `python tools/check_doors.py photos/ --models yolov8n-oiv7.pt yolov8s-oiv7.pt`;
+  if the small model does better, start SENSE with `--scene-model yolov8s-oiv7.pt`.
+- **People are "a person" unless their face is verified.** Earlier versions named people from the
+  colour of their clothes, which matched different people (8 of 15 pairs in a test). Now only face
+  recognition can name someone, and it needs a clear, roughly frontal face; turned away, in the dark
+  or masked, SENSE says "a person". People taught with the old clothing method must be taught again.
 
 - The heading comes from optical flow. It drifts over time and resets every run, so turn
   directions are only given for things seen in the current run.
