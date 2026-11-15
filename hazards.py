@@ -135,8 +135,8 @@ class SceneHazardDetector:
 
     Cost control: it runs only every EVERY_N frames, on a smaller image, and
     only for the hazard classes, so the main loop stays fast. No thread.
-    Warnings reuse ApproachTracker: a door ahead that grows quickly (you walk
-    towards it) or suddenly fills the view.
+    Identity, "door ahead" announcements and proximity warnings are handled by
+    continuity.py (one identity per door while you walk towards it).
     """
     HAZARD_NAMES = ("door", "stairs")
     HANDLE = "door handle"  # audit fix 3: the most distinctive part of a plain white door
@@ -145,15 +145,12 @@ class SceneHazardDetector:
     MIN_CONF = 0.25         # a door or stairs box on its own must score at least this
     WEAK_DOOR_CONF = 0.10   # a weaker door box counts only if a handle sits inside it
     HANDLE_CONF = 0.30      # a handle on its own -> "door handle" (honest: that is what was seen)
-    ANNOUNCE_AGAIN_S = 10.0 # say "door ahead" again only after it was out of view this long
     VISIBLE_S = 2.5         # how long a sighting counts as "visible now"
 
     def __init__(self, model):
         self.model = model
         self.class_ids = {i: n.lower() for i, n in model.names.items()
                           if n.lower() in self.HAZARD_NAMES + (self.HANDLE,)}
-        self.approach = ApproachTracker()
-        self.approach.WINDOW_S = 1.2   # we only sample every EVERY_N frames
         self.boxes = []          # last result, for the HUD: (name, x1, y1, x2, y2)
         self.seen = {}           # name -> dict(time, angle, frac, conf, first)
         self._last_log = 0.0
@@ -195,13 +192,18 @@ class SceneHazardDetector:
                 out.append((self.HANDLE, conf, box))
         return out
 
-    def update(self, frame, frame_count, now):
-        """Returns a list of (key, text) warnings (usually empty)."""
+    def detect(self, frame, frame_count, now):
+        """Run the door/stairs model on every EVERY_N-th frame.
+
+        Returns None on frames where it did not run, else the accepted
+        detections [(name, conf, (x1, y1, x2, y2))]. Announcements and
+        proximity alerts are made by continuity.py, which keeps one identity
+        per door while you walk towards it (foundation fix 2)."""
         if not self.class_ids or frame_count % self.EVERY_N:
-            return []
+            return None
         res = self.model.predict(frame, classes=list(self.class_ids), conf=self.WEAK_DOOR_CONF,
                                  imgsz=self.IMG_SIZE, verbose=False)
-        frame_h, frame_w = frame.shape[:2]
+        frame_w = frame.shape[1]
         raw = []
         for box in (res[0].boxes if res and res[0].boxes is not None else []):
             name = self.class_ids.get(int(box.cls[0]))
@@ -210,28 +212,18 @@ class SceneHazardDetector:
             x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
             conf = float(box.conf[0]) if getattr(box, "conf", None) is not None else 0.0
             raw.append((name, conf, (x1, y1, x2, y2)))
-        self.boxes, best = [], {}
-        for name, conf, (x1, y1, x2, y2) in self.filter_detections(raw):
-            self.boxes.append((name, x1, y1, x2, y2))
+        accepted = self.filter_detections(raw)
+        self.boxes = [(n, *b) for n, _, b in accepted]
+        best = {}
+        for name, conf, (x1, y1, x2, y2) in accepted:
             angle = spatial.pixel_to_angle((x1 + x2) / 2, frame_w)
-            # per class keep the box closest to straight ahead
-            if name not in best or abs(angle) < abs(best[name][1]):
-                best[name] = (y2 - y1, angle, conf)
-        alerts = []
-        for name, (box_h, angle, conf) in best.items():
-            prev = self.seen.get(name)
-            frac = box_h / float(frame_h)
-            if prev is None or now - prev["time"] > self.ANNOUNCE_AGAIN_S:
-                # newly in view: tell the user once, with its direction
-                alerts.append(("new:" + name, f"{name.capitalize()} {spatial.direction_phrase(angle)}"
-                               + (", very close" if frac > 0.7 else "")))
-            self.seen[name] = {"time": now, "angle": angle, "frac": frac, "conf": conf}
-            if name != self.HANDLE and self.approach.update("scene:" + name, now, box_h, frame_h, angle):
-                alerts.append(("scene:" + name, f"Careful, {name} right in front of you"))
+            if name not in best or abs(angle) < abs(best[name][0]):
+                best[name] = (angle, conf)
+        for name, (angle, conf) in best.items():      # for "where is the door?"
+            self.seen[name] = {"time": now, "angle": angle, "conf": conf}
         if raw and now - self._last_log >= 1.0:   # diagnostics, at most once a second
             self._last_log = now
-            kept = {(n, b) for n, _, b in self.filter_detections(raw)}
+            kept = {(n, b) for n, _, b in accepted}
             print("🚪 Candidates: " + ", ".join(
                 f"{n} {c:.2f}{'' if (n, b) in kept else ' (rejected)'}" for n, c, b in raw))
-        self.approach.prune(now)
-        return alerts
+        return accepted

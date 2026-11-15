@@ -30,8 +30,8 @@ HANDLE_ELSEWHERE = (40, 250, 60, 265)
 
 def run(dets):
     det = hazards.SceneHazardDetector(FakeModel(dets))
-    alerts = det.update(np.zeros((480, 640, 3), np.uint8), det.EVERY_N, 1.0)
-    return det, alerts
+    accepted = det.detect(np.zeros((480, 640, 3), np.uint8), det.EVERY_N, 1.0)
+    return det, accepted
 
 
 class TestDoorEvidence(unittest.TestCase):
@@ -44,14 +44,14 @@ class TestDoorEvidence(unittest.TestCase):
         self.assertEqual([b[0] for b in det.boxes], ["door"])
 
     def test_weak_door_alone_is_rejected(self):
-        det, alerts = run([(164, 0.15, DOOR)])
+        det, accepted = run([(164, 0.15, DOOR)])
         self.assertEqual(det.boxes, [])
-        self.assertEqual(alerts, [])
+        self.assertEqual(accepted, [])
 
     def test_weak_door_with_handle_inside_is_accepted(self):
         det, alerts = run([(164, 0.15, DOOR), (165, 0.45, HANDLE_ON_DOOR)])
         self.assertEqual([b[0] for b in det.boxes], ["door"])     # handle merged into the door
-        self.assertTrue(any(k == "new:door" and t.startswith("Door in front of you") for k, t in alerts))
+        self.assertEqual([n for n, _, _ in alerts], ["door"])
 
     def test_weak_door_with_handle_elsewhere_is_rejected(self):
         det, alerts = run([(164, 0.15, DOOR), (165, 0.45, HANDLE_ELSEWHERE)])
@@ -60,7 +60,14 @@ class TestDoorEvidence(unittest.TestCase):
     def test_handle_alone_is_called_a_handle_not_a_door(self):
         det, alerts = run([(165, 0.45, HANDLE_ON_DOOR)])
         self.assertEqual([b[0] for b in det.boxes], ["door handle"])
-        self.assertTrue(any(t.startswith("Door handle") for _, t in alerts))
+        self.assertEqual([n for n, _, _ in alerts], ["door handle"])
+
+    def test_runs_only_every_n_frames(self):
+        det = hazards.SceneHazardDetector(FakeModel([(164, 0.40, DOOR)]))
+        frame = np.zeros((480, 640, 3), np.uint8)
+        runs = [det.detect(frame, i, i / 15.0) is not None for i in range(1, 16)]
+        self.assertEqual(sum(runs), 15 // det.EVERY_N)
+        self.assertIn("door", det.visible(1.0))
 
     def test_weak_handle_is_ignored(self):
         det, alerts = run([(165, 0.20, HANDLE_ON_DOOR)])

@@ -20,6 +20,7 @@ from events import EventTracker
 from notifier import Notifier, P1, P2, P3
 from hazards import LoomingDetector, ApproachTracker, SceneHazardDetector
 from people import PersonIdentityGate, count_phrase
+from continuity import ObjectContinuity
 from face_id import FaceID, Enrolment, decide as face_decide
 
 # =====================================================================
@@ -38,6 +39,37 @@ video_source = int(args.source) if args.source.isdigit() else args.source
 memory_db.init_database()
 print("Starting SENSE Master Spatial Intelligence System (Dual-Tier Object Re-ID)...")
 model = YOLO("yolov8s.pt")
+
+# ByteTrack returns its Kalman-FILTERED box, not the detection itself. For a new
+# track the filter starts small and "grows" into the real box over ~1 s - which
+# looked exactly like walking towards it (found in the smoke run: a false
+# "person very close"). Size-based distance and approach need the raw detection,
+# so we keep a copy of the detector output before the tracker replaces it.
+# Registered before the first model.track() call, so it runs before the tracker.
+_raw_dets = {"xyxy": None, "conf": None, "cls": None}
+
+
+def _stash_raw_detections(predictor):
+    b = predictor.results[0].boxes
+    _raw_dets.update(xyxy=b.xyxy.cpu().numpy(), conf=b.conf.cpu().numpy(), cls=b.cls.cpu().numpy())
+
+
+model.add_callback("on_predict_postprocess_end", _stash_raw_detections)
+
+
+def raw_detection_box(tracked_box, conf, cls_id):
+    """The detector's own box behind a tracked box: same class, same score (the
+    tracker copies the score of the detection it matched), best overlap."""
+    if _raw_dets["xyxy"] is None:
+        return tracked_box
+    best, best_iou = tracked_box, 0.3
+    for xyxy, c, k in zip(_raw_dets["xyxy"], _raw_dets["conf"], _raw_dets["cls"]):
+        if int(k) != cls_id or abs(float(c) - conf) > 1e-4:
+            continue
+        ov = box_iou(tracked_box, tuple(float(v) for v in xyxy))
+        if ov > best_iou:
+            best, best_iou = tuple(float(v) for v in xyxy), ov
+    return best
 # Doors / stairs: COCO has no such classes, so a small Open Images model is used
 # (downloaded once on the first run, then offline). SENSE still works without it.
 try:
@@ -115,7 +147,7 @@ last_db_write = {}                                       # E2 throttle: name -> 
 DB_WRITE_INTERVAL_S = 1.0
 last_changes_query = None                                # E6 "what changed" bookmark
 looming = LoomingDetector()                              # sudden obstacles, any object
-approach = ApproachTracker()                             # fast-growing YOLO boxes, any class
+approach = ApproachTracker()                             # fast-growing YOLO boxes, other classes
 last_frame_time = None
 track_conf = {}                                          # tid -> smoothed detector confidence
 
@@ -163,7 +195,6 @@ voice_queue = queue.Queue()
 # Heading & Display Persistence Buffers
 cumulative_camera_heading = 0.0
 frame_count = 0
-last_detected_boxes = None
 
 ALLOWED_ITEMS = {
     "cell phone": "phone",
@@ -184,6 +215,17 @@ HAZARD_ITEMS = {
 }
 ALLOWED_ITEMS.update(HAZARD_ITEMS)
 HAZARD_NAMES = set(HAZARD_ITEMS.values())
+
+# Foundation fix 2 + 3: persistent identities and distance-trend proximity
+# alerts for the things you can walk into (continuity.py). One instance per
+# detector, because they run at different rates.
+CONTINUITY_CLASSES = HAZARD_NAMES | {"person"}
+coco_objects = ObjectContinuity(CONTINUITY_CLASSES, source="coco")
+scene_objects = ObjectContinuity({"door", "stairs", "door handle"}, source="scene")
+shift_since_coco = [0.0, 0.0]        # camera image motion since each tracker last ran
+shift_since_scene = [0.0, 0.0]
+last_scene_announce = {}             # class -> (time, angle) of the last "door ahead"
+CONTINUITY_MIN_CREATE_CONF = 0.35    # weaker boxes may only continue an existing object
 
 # Object sizes for distance estimates now live in distance.py (audit fix 2).
 
@@ -482,6 +524,18 @@ def answer_voice_query(user_text):
             active_items.append(f"a person {people_now[0]['zone']}, {people_now[0]['dist_phrase']}")
         elif people_now:
             active_items.append(count_phrase(len(people_now)))
+        # Things you can walk into, tracked by continuity.py: they are reported
+        # even while you walk (live_memory above only fills when the camera is
+        # steady, so "what do you see" used to answer nothing while moving).
+        said = " ".join(active_items).lower()
+        for obj in sorted(coco_objects.objects.values(), key=lambda o: -o.hits):
+            if obj.cls == "person" or current_time - obj.last_seen > 2.5 or obj.cls in said:
+                continue
+            angle = spatial.pixel_to_angle((obj.box[0] + obj.box[2]) / 2, globals().get("frame_width", 1280))
+            d = obj.current_distance(current_time)
+            dist_words = (", " + distance.phrase(distance.Estimate(d, d * 0.8, d * 1.2))) if d else ""
+            active_items.append(f"{object_label(obj)} {spatial.direction_phrase(angle)}{dist_words}")
+            said += " " + obj.cls
         if scene_hazards is not None:   # doors / stairs from the second model
             for hz_name, hz_angle in scene_hazards.visible(current_time).items():
                 active_items.append(f"a {hz_name} {spatial.direction_phrase(hz_angle)}")
@@ -800,6 +854,55 @@ def forget_command(user_text):
     speak(f"Done. I have forgotten {target}.")
 
 
+def box_iou(a, b):
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def object_label(obj):
+    """Spoken name for a persistent object: a person only by verified face."""
+    if obj.cls == "person":
+        return person_gate.spoken(obj.bt_id) if obj.bt_id is not None else "a person"
+    return obj.cls if obj.cls == "stairs" else f"a {obj.cls}"
+
+
+def update_coco_objects(dets, now, frame_w, frame_h):
+    """Foundation fix 2 + 3: identity continuity and ONE alert per approach."""
+    coco_objects.update(dets, now, tuple(shift_since_coco), frame_size=(frame_w, frame_h))
+    shift_since_coco[:] = [0.0, 0.0]
+    for obj, words in coco_objects.proximity_alerts(now, frame_w):
+        where = spatial.direction_phrase(spatial.pixel_to_angle((obj.box[0] + obj.box[2]) / 2, frame_w))
+        notifier.push(P1, f"near:coco:{obj.oid}", f"Careful, {object_label(obj)} {where}, {words}")
+
+
+def update_scene_objects(dets, now, frame_w, frame_h, f_px):
+    """Doors / stairs from the second model, with the same continuity layer."""
+    cdets = [{"cls": n, "box": b, "conf": c, "bt_id": None, "can_create": True,
+              "est": None if n == "door handle" else
+              distance.object_distance(n, b, frame_w, frame_h, f_px, focal_unc=FOCAL_UNC)}
+             for n, c, b in dets]
+    _, created = scene_objects.update(cdets, now, tuple(shift_since_scene), frame_size=(frame_w, frame_h))
+    shift_since_scene[:] = [0.0, 0.0]
+    for obj, _ in created:
+        angle = spatial.pixel_to_angle((obj.box[0] + obj.box[2]) / 2, frame_w)
+        prev = last_scene_announce.get(obj.cls)
+        last_scene_announce[obj.cls] = (now, angle)
+        if prev and now - prev[0] < 10.0 and abs(angle - prev[1]) < 25.0:
+            continue      # the same door flickering in and out: say it once
+        # was: box taller than 70% of the frame - but a 2 m door 3 m away already
+        # is (smoke test). Use the distance estimate, or "wider than the view".
+        d = obj.current_distance(now)
+        very_close = obj.filled or (d is not None and d <= distance.ARM_REACH_M)
+        notifier.push(P1, f"seen:{obj.cls}", f"{obj.cls.capitalize()} {spatial.direction_phrase(angle)}"
+                      + (", very close" if very_close else ""))
+    for obj, words in scene_objects.proximity_alerts(now, frame_w):
+        where = spatial.direction_phrase(spatial.pixel_to_angle((obj.box[0] + obj.box[2]) / 2, frame_w))
+        notifier.push(P1, f"near:scene:{obj.oid}", f"Careful, {object_label(obj)} {where}, {words}")
+
+
 def handle_event(ev):
     """Log an event to SQLite and decide whether it is worth saying (Roadmap E2 + E3)."""
     name, kind = ev["name"], ev["type"]
@@ -991,9 +1094,15 @@ while True:
     ttc = looming.update(frame_gray, frame_dt)
     if ttc is not None:
         notifier.push(P1, "looming", "Stop. Something is right in front of you")
+    shift_since_coco[0] += camera_dx
+    shift_since_coco[1] += camera_dy
+    shift_since_scene[0] += camera_dx
+    shift_since_scene[1] += camera_dy
     if scene_hazards is not None:
-        for hz_key, hz_text in scene_hazards.update(frame, frame_count, current_time):
-            notifier.push(P1, hz_key, hz_text)
+        scene_dets = scene_hazards.detect(raw_frame, frame_count, current_time)
+        if scene_dets is not None:      # the door model ran on this frame
+            update_scene_objects(scene_dets, current_time, frame_width, frame_height,
+                                 distance.focal_px(frame_width, focal_ratio=FOCAL_RATIO))
     is_camera_moving = camera_speed > 3.0
     if is_camera_moving:
         last_camera_move_time = current_time
@@ -1005,13 +1114,17 @@ while True:
     should_run_yolo = camera_is_stable or (frame_count % 3 == 0)
 
     if should_run_yolo:
-        results = model.track(frame, persist=True, conf=0.30, tracker="bytetrack.yaml", verbose=False)
+        # Foundation fix 2: conf=0.10 (was 0.30). ByteTrack's second stage keeps
+        # tracks alive with LOW-score boxes (0.1-0.25) during blur or partial
+        # occlusion; filtering them out before tracking broke tracks. SENSE's
+        # own per-class confidence gates below still decide what is announced.
+        results = model.track(frame, persist=True, conf=0.10, tracker="bytetrack.yaml", verbose=False)
         boxes = results[0].boxes
-        if boxes is not None and len(boxes) > 0:
-            last_detected_boxes = boxes
     else:
-        # RETAIN previous boxes so they NEVER vanish or blink!
-        boxes = last_detected_boxes
+        # Foundation fix 2: no stale boxes. Objects keep their identity in
+        # continuity.py while YOLO is skipped, but nothing old is shown or used.
+        boxes = None
+    continuity_dets = []
 
     candidates = []
     active_people_crops.clear()
@@ -1028,18 +1141,29 @@ while True:
             center_x = int((x1 + x2) / 2)
             center_y = int((y1 + y2) / 2)
 
-            # Sudden-obstacle check for ANY of YOLO's 80 classes (not just the
-            # whitelist), on fresh detections only, even while walking.
-            if should_run_yolo and conf >= 0.35 and approach.update(
+            # Persistent identity + proximity for things you can walk into
+            sense_name = "person" if raw_name == "person" else HAZARD_ITEMS.get(raw_name)
+            if sense_name in CONTINUITY_CLASSES:
+                rb = raw_detection_box((x1, y1, x2, y2), conf, int(box.cls[0]))
+                bx = (max(0, rb[0]), max(0, rb[1]), min(frame_width, rb[2]), min(frame_height, rb[3]))
+                if sense_name == "person":
+                    eye_t, eye_px_c = face_eye_px.get(track_id, (0.0, None))
+                    est_c = distance.person_distance(bx, frame_width, frame_height, f_px,
+                                                     eye_px=eye_px_c if current_time - eye_t < 0.5 else None,
+                                                     focal_unc=FOCAL_UNC)
+                else:
+                    est_c = distance.object_distance(sense_name, bx, frame_width, frame_height,
+                                                     f_px, focal_unc=FOCAL_UNC)
+                continuity_dets.append({"cls": sense_name, "box": bx, "conf": conf, "bt_id": track_id,
+                                        "can_create": conf >= CONTINUITY_MIN_CREATE_CONF, "est": est_c})
+
+            # Sudden-obstacle check for the OTHER YOLO classes (box growth),
+            # on fresh detections only, even while walking.
+            if sense_name not in CONTINUITY_CLASSES and conf >= 0.35 and approach.update(
                     track_id, current_time, y2 - y1, frame_height,
                     spatial.pixel_to_angle(center_x, frame_width),
                     is_person=(raw_name == "person")):
-                if raw_name == "person":
-                    # audit fix 1: a name only if face recognition verified it
-                    what = person_gate.spoken(track_id)
-                else:
-                    what = f"a {raw_name}"
-                notifier.push(P1, f"approach:{track_id}", f"Careful, {what} right in front of you")
+                notifier.push(P1, f"approach:{raw_name}", f"Careful, a {raw_name} right in front of you")
 
             if raw_name == "person":
                 entity_name = "person"
@@ -1063,7 +1187,12 @@ while True:
                 "center": (center_x, center_y)
             })
 
-    # Spatial Conflict Resolution (<75 px)
+    if should_run_yolo:
+        update_coco_objects(continuity_dets, current_time, frame_width, frame_height)
+
+    # Duplicate suppression: two boxes for the SAME thing (YOLO sometimes gives
+    # one object two classes). Was: any box within 75 px of a stronger one, which
+    # also deleted a phone lying on a laptop. Now the boxes must overlap heavily.
     filtered_candidates = []
     candidates.sort(key=lambda c: c["conf"], reverse=True)
 
@@ -1071,8 +1200,7 @@ while True:
         cx, cy = cand["center"]
         conflict = False
         for chosen in filtered_candidates:
-            chosen_cx, chosen_cy = chosen["center"]
-            if ((cx - chosen_cx)**2 + (cy - chosen_cy)**2)**0.5 < 75:
+            if box_iou(cand["box"], chosen["box"]) > 0.7:
                 conflict = True
                 break
         if not conflict:
