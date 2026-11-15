@@ -122,9 +122,7 @@ away from the camera are not detected at all.
 Keep the terminal visible. Every key press now prints a line, so you can see where a press went:
 `⌨️  SPACE (window) -> listening`, `⌨️  SPACE (terminal) -> listening`, or
 `⌨️  SPACE (window) ignored: still transcribing (1.2s)…`. At start-up SENSE prints
-`🎙️ Microphone: <name>`, `🎙️ Whisper 'tiny' loaded in …s (offline)` and
-`🙂 … People enrolled by face (loaded from SQLite): [...]`. The beep now plays only once the
-microphone is open, so start speaking after the beep.
+`🎙️ Microphone: <name>` and `🎙️ Whisper 'tiny' loaded in …s (offline)`.
 
 | Step | Expected |
 | --- | --- |
@@ -133,14 +131,44 @@ microphone is open, so start speaking after the beep.
 | V3 Press space, then press it 3 more times quickly while it is listening | One beep, one answer. The extra presses print `ignored: still recording/transcribing` |
 | V4 Press space and say nothing for 6 s | "I didn't hear anything. Press space and speak after the beep." Then press space again: it listens normally |
 | V5 Press space and only breathe / tap the table | Either "I didn't hear…" or a terminal line `Whisper repeating its hint words … ignored` or `marked this as no speech`. It must **never** say "Done. I have forgotten …" |
-| V6 Sneha in front of the camera: space, **wait for the beep**, "This is Sneha" | Terminal in this order: `🎙️ Mic opened after …s`, `🎙️ Beep done … Listening now`, `👂 Heard: 'This is Sneha.'` (the WHOLE sentence; if it shows only 'Sneha.' the mic is still opening late: send the lines), `🧭 Intent: LEARN`, `🪪 Registration: name heard = 'sneha'…`, `🙂 Face sample 1/5` … `5/5`, `🪪 … saved to SQLite`. You hear "Okay. Sneha, please look at the camera…" then "Got it. I will recognise Sneha by face." |
+| V6 Sneha in front of the camera: space, "This is Sneha" | "Okay. Sneha, please look at the camera…" then "Got it. I will recognise Sneha by face." |
 | V7 Quit with `q`. Start SENSE again (repeat this **5 times**). Each time: press space, ask "Who is here?" with Sneha in view | Start-up says "Restored … and 1 people" (or more). Every time: Sneha is named. Space works every time, from the terminal or the window |
 | V8 After the 5 restarts: `python -c "import sqlite3; print(sqlite3.connect('sense_memory.db').execute('select name, count(*) from face_profiles group by name').fetchall())"` | Sneha is listed with 5 or more samples, every run |
 | V9 Optional: `python -m pytest tests/test_voice_audio.py -s` on the Mac | Runs REAL Whisper on the test recording: prints `Real Whisper heard: '…This is Sneha…'` and passes |
 
 If a press does nothing at all (no `⌨️` line), the key went to another app: click the terminal
 SENSE runs in, or the video window. If you see the `⌨️` line and the beep but it times out, look
-at the `🎙️ Microphone:` line: if it is not your Mac's microphone, start SENSE with `--mic "MacBook"`.
+at the `🎙️ Microphone:` line: if it is not your Mac's microphone (Camo can add its own), start
+SENSE with `--mic "MacBook"`.
+
+## 4e. Android phone camera through Camo
+
+Setup (once): install **Camo Camera** on the phone and **Camo Studio** on the Mac. Connect the phone
+with a **USB cable** first (most stable). In Camo Studio, pick the phone as the source, set the
+resolution to **720p or 1080p, 30 fps**, and hold the phone in **landscape**. Then:
+
+```bash
+python tools/find_cameras.py          # shows each camera; press P on the phone picture, B on the Mac camera
+python sense_master.py --camera camo  # remembered: next time plain `python sense_master.py` uses Camo
+```
+
+| Step | Expected |
+| --- | --- |
+| C1 `python tools/find_cameras.py` | Lists the cameras with names, e.g. `0: Camo`, `1: FaceTime HD Camera` (the order may differ: that is why SENSE looks them up by name). Each camera shows `live`. Press P / B as asked; it prints `saved:` |
+| C2 `python sense_master.py --camera camo` | Terminal: `📷 Camera: phone camera (Camo) = index N: …`, frames `1280x720`. The window shows the phone's picture |
+| C3 Point the phone at a chair 3 m away, walk towards it | Same as section 4: one "Careful, a chair…" alert. The HUD boxes follow the chair while the phone moves |
+| C4 Ask "What do you see?" while panning slowly | Names what the phone sees, with left/right correct |
+| C5 Sneha in front of the phone: "This is Sneha", then "Who is here?" | Works as in section 3 (the face is learned from the phone's picture) |
+| C6 Press `c` | "Switching to the laptop camera." then "Switched to the built-in camera." Terminal: `📷 New camera picture: motion tracking restarted.` No false "Stop. Something is right in front of you." |
+| C7 Press `c` again | Back to the phone ("Switched to the phone camera (Camo)") |
+| C8 Pull the USB cable for 3 s, plug it back | Either "Camera lost…" then "Camera is back." or "The camera picture is frozen. Check that the phone is connected in Camo." and the picture moves again after reconnecting. SENSE never quits |
+| C9 Pull the cable and leave it out for 15 s | Within ~10 s: "…Using the laptop camera. Press C to try the phone again." SENSE keeps running |
+| C10 Quit Camo Studio, start SENSE with `--camera camo` | "I can't find the phone camera. Using the laptop camera. Open Camo Studio and press C to switch." Terminal explains: `Camo camera not found. Open Camo Studio…` |
+| C11 Wi-Fi: unplug USB, connect Camo over Wi-Fi (same network), start SENSE | Works like C2–C4. Note any lag; if the picture stutters, go back to USB |
+| C12 Space and voice while on Camo | Same as 4d V1–V4 (the camera choice does not affect the microphone, unless `🎙️ Microphone:` shows a Camo microphone: then use `--mic "MacBook"`) |
+
+Write down for C3: the frame rate the HUD feels like (smooth / jerky) with Camo compared with the
+built-in camera.
 
 ## 5. Distance calibration (optional, recommended)
 
