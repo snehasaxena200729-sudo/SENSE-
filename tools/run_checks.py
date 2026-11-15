@@ -268,15 +268,6 @@ def main():
             results.append((title, not errs, errs, f"{run['frames']} frames in {run['took']:.0f} s; said: "
                             + (" | ".join(spoken) or "nothing")))
 
-        if os.path.exists(os.path.join(args.videos, "approach_far.mp4")):
-            print("== Scenario: cameras: Camo 1080p shaky, switch, unplug, fallback (tools/camera_drill.py)")
-            r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "camera_drill.py"), args.videos],
-                               cwd=ROOT, capture_output=True, text=True, timeout=900)
-            lines = (r.stdout or "").splitlines()
-            fails = [l for l in lines if l.startswith("FAIL")] or ([] if r.returncode == 0 else lines[-8:])
-            results.append(("cameras: Camo feed, switch, unplug, fallback", r.returncode == 0, fails,
-                            next((l for l in reversed(lines) if l.endswith("failed.")), "")))
-
         people = os.path.join(args.videos, "people.mp4")
         if os.path.exists(people):
             title = f"'this is {n}', then quit and restart SENSE 3 times"

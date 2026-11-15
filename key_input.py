@@ -1,5 +1,5 @@
 """
-key_input.py - SENSE's keys (SPACE = talk, C = camera, Q = quit) from the
+key_input.py - SENSE's keys (SPACE = talk, Q = quit) from the
 OpenCV window AND from the terminal, without an extra thread.
 
 Root cause this fixes
@@ -27,7 +27,7 @@ import atexit
 import os
 import sys
 
-KEY_NAMES = {ord(" "): "SPACE", ord("q"): "Q", ord("c"): "C"}
+KEY_NAMES = {ord(" "): "SPACE", ord("q"): "Q"}
 
 
 class TerminalKeys:

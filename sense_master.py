@@ -24,30 +24,23 @@ from continuity import ObjectContinuity
 from face_id import FaceID, Enrolment, decide as face_decide
 from guidance import FindGuide
 import scene_diff
-from camera_source import CameraSource, CameraNotFound
 from voice_input import VoiceInput, find_mic, default_mic_name
 from key_input import TerminalKeys, window_key, KEY_NAMES
 
 # =====================================================================
 # 1. INITIALIZATION & SETUP
 # =====================================================================
-# Camera: --camera builtin|camo picks a camera BY NAME (camera_source.py explains
-# why index 0 is not reliable once Camo is installed). The choice is remembered.
-# --source still takes a camera index or a recorded video file for repeatable tests:
-#   python sense_master.py --camera camo
-#   python sense_master.py --source test_clips/desk.mp4
+# Video source: webcam index (default 0) or a path to a recorded video file.
+# Example: python sense_master.py --source test_clips/desk.mp4
 parser = argparse.ArgumentParser(description="SENSE Master Assistive System")
-parser.add_argument("--camera", choices=["builtin", "camo"], default=None,
-                    help="built-in Mac camera or Android phone through Camo (remembered for next time)")
-parser.add_argument("--source", default=None,
+parser.add_argument("--source", default="0",
                     help="Camera index (e.g. 0) or path to a video file for repeatable testing")
-parser.add_argument("--max-width", type=int, default=1280,
-                    help="frames wider than this are scaled down (Camo can send 1080p/4K; YOLO uses 640 anyway)")
 parser.add_argument("--mic", default=None,
                     help="part of the microphone name to use, e.g. 'MacBook' (default: the Mac's default input)")
 parser.add_argument("--scene-model", default="yolov8n-oiv7.pt",
                     help="door/stairs model; try yolov8s-oiv7.pt if tools/check_doors.py shows it sees your door better")
 args = parser.parse_args()
+video_source = int(args.source) if args.source.isdigit() else args.source
 
 memory_db.init_database()
 print("Starting SENSE Master Spatial Intelligence System (Dual-Tier Object Re-ID)...")
@@ -93,24 +86,7 @@ try:
 except Exception as e:
     scene_hazards = None
     print(f"🚪 Door/stairs detection off ({e}). Connect to the internet once to download {args.scene_model}.")
-
-def _saved_camera(kind):
-    """{"index", "name"} verified by tools/find_cameras.py, or None."""
-    idx = memory_db.get_setting(f"camera_index_{kind}")
-    return {"index": int(idx), "name": memory_db.get_setting(f"camera_name_{kind}")} if idx not in (None, "") else None
-
-
-if args.source is not None:
-    camera_spec = args.source
-elif args.camera:
-    camera_spec = args.camera
-    memory_db.set_setting("camera_source", args.camera)
-else:
-    camera_spec = memory_db.get_setting("camera_source", "builtin")
-_startup_notes = []          # camera problems found before speak() exists; spoken in the greeting
-camera = CameraSource(camera_spec, max_width=args.max_width,
-                      saved={k: _saved_camera(k) for k in ("builtin", "camo")},
-                      announce=lambda msg: _startup_notes.append(msg))
+camera = cv2.VideoCapture(video_source)
 
 recognizer = sr.Recognizer()
 recognizer.pause_threshold = 1.0   # silence that ends a question (was 1.3 s)
@@ -121,10 +97,9 @@ feature_params = dict(maxCorners=150, qualityLevel=0.25, minDistance=12, blockSi
 lk_params = dict(winSize=(31, 31), maxLevel=3,
                  criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 15, 0.03))
 
-try:
-    old_frame = camera.open()
-except CameraNotFound as e:
-    raise SystemExit(f"📷 {e}\n   Cameras: python tools/find_cameras.py   |   video file: --source clip.mp4")
+ret, old_frame = camera.read()
+if not ret:
+    raise SystemExit(f"Could not read from video source: {args.source}")
 old_gray = cv2.cvtColor(old_frame, cv2.COLOR_BGR2GRAY)
 p0 = cv2.goodFeaturesToTrack(old_gray, mask=None, **feature_params)
 
@@ -164,7 +139,7 @@ def refresh_people():
 whisper_prompt = ""
 refresh_people()
 if face_ident is not None:
-    print(f"🙂 Face recognition on. People enrolled by face: {list(known_people) or 'none yet'}")
+    print(f"🙂 Face recognition on. People enrolled by face (loaded from SQLite): {list(known_people) or 'none yet'}")
 live_people = {}             # track id -> what we know about an (unnamed) person in view
 known_objects = memory_db.load_all_custom_object_profiles()
 if legacy_people:
@@ -403,6 +378,8 @@ def learn_person(name):
     seconds, collected by the main loop so nothing blocks). The old version saved
     the shirt colour, which matched other people."""
     global enrolment
+    print(f"🪪 Registration: name heard = {name!r}, people in view = {len(active_people_crops)}, "
+          f"face recognition {'on' if face_ident is not None else 'OFF'}")
     if face_ident is None:
         speak("Face recognition is off, so I won't name people. "
               + (f"The reason: {FaceID.last_error}" if FaceID.last_error else ""))
@@ -420,6 +397,7 @@ def learn_person(name):
         return 0.0 if face is None else float(face[2] * face[3])
     sizes = {tid: face_size(tid) for tid in active_people_crops}
     target = max(sizes, key=sizes.get)
+    print(f"🪪 Registration: face sizes per person (px²) = {sizes}")
     if sizes[target] == 0.0:
         speak("I can't see a face. Please look at the camera and say it again.")
         return
@@ -432,6 +410,8 @@ def finish_enrolment(now):
     """Called by the main loop when the face samples are collected (or time ran out)."""
     global enrolment
     e, enrolment = enrolment, None
+    print(f"🪪 Registration of {e.name}: {len(e.samples)} face samples in {now - e.started:.1f}s "
+          f"(need {Enrolment.MIN_SAMPLES})")
     if not e.ok():
         speak(f"I couldn't see {e.name}'s face clearly. Face the camera in good light and say it again.")
         return
@@ -445,6 +425,8 @@ def finish_enrolment(now):
         speak(f"This face already looks like {clash[0]}. If that is wrong, say forget {clash[0]}, then try again.")
         return
     memory_db.save_face_embeddings(e.name, e.samples, created_at=now)
+    saved = len(memory_db.load_face_profiles().get(e.name, {}).get("embeddings", []))
+    print(f"🪪 Registration of {e.name}: saved to SQLite ({saved} face samples stored for this name)")
     refresh_people()
     person_gate.reset_track(e.track_id)   # old "unknown" checks must not count against the new name
     print(f"✨ Enrolled {e.name} by face ({len(e.samples)} samples).")
@@ -1220,10 +1202,7 @@ elif unverifiable_people():
     n = len(unverifiable_people())
     startup += (f" {n} {'person was' if n == 1 else 'people were'} taught with the old clothing method. "
                 f"Please introduce them again by face.")
-for note in _startup_notes:          # e.g. "I can't find the phone camera. Using the laptop camera..."
-    startup += " " + note
 speak(startup)
-camera.announce = speak              # camera lost / back / frozen are said straight away
 
 # Keys: from the video window (cv2.waitKey) AND from the terminal SENSE was
 # started in (key_input.py). On macOS the video window often opens without
@@ -1236,7 +1215,7 @@ try:
 except Exception:  # noqa: BLE001  (not supported by every OpenCV build / headless runs)
     pass
 terminal_keys = TerminalKeys(enabled=not os.environ.get("SENSE_NO_TERMINAL_KEYS"))
-print("⌨️  Keys: SPACE = talk, C = switch camera (built-in / Camo), Q = quit. They work in the video window"
+print("⌨️  Keys: SPACE = talk, Q = quit. They work in the video window"
       + (" and in this terminal." if terminal_keys.enabled else " (click it first)."))
 
 
@@ -1251,35 +1230,7 @@ def handle_key(k, where):
         return True
     if k == ord(" "):
         trigger_voice(where)
-    elif k == ord("c"):
-        switch_camera()
     return False
-
-
-def switch_camera():
-    if camera.kind not in ("builtin", "camo"):
-        speak("Camera switching works with --camera builtin or camo, not with --source.")
-        return
-    target = camera.other_kind()
-    speak("Switching to the " + ("phone camera." if target == "camo" else "laptop camera."))
-    msg = camera.switch(target)
-    if camera.kind == target:
-        memory_db.set_setting("camera_source", target)    # remembered for the next start
-    speak(msg)
-
-
-def reset_after_camera_change():
-    """A different camera or picture size: optical flow, looming and ByteTrack
-    must start fresh (old points / tracks belong to a different picture)."""
-    global p0, old_gray, last_frame_time
-    p0, old_gray, last_frame_time = None, None, None
-    looming.prev = None
-    try:
-        for tr in getattr(model.predictor, "trackers", None) or []:
-            tr.reset()
-    except Exception as e:  # noqa: BLE001
-        print(f"📷 Tracker reset note: {e}")
-    print("📷 New camera picture: motion tracking restarted.")
 
 
 def poll_keys():
@@ -1289,11 +1240,6 @@ def poll_keys():
         quit_now = handle_key(k, "terminal") or quit_now
     return quit_now
 
-
-NO_CAMERA_FRAME = np.zeros((360, 640, 3), np.uint8)
-cv2.putText(NO_CAMERA_FRAME, "NO CAMERA - reconnecting...", (40, 170), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-cv2.putText(NO_CAMERA_FRAME, "SPACE talk   C switch camera   Q quit", (40, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-            (200, 200, 200), 1)
 
 # =====================================================================
 # 5. MAIN REAL-TIME MULTIMODAL LOOP
@@ -1305,18 +1251,7 @@ while True:
 
     success, frame = camera.read()
     if not success:
-        if camera.is_file:
-            break                      # the recorded clip ended
-        # Live camera lost (cable, Camo, sleep): keep voice and keys working
-        # while camera.read() retries; never a busy loop (waitKey waits 30 ms).
-        cv2.imshow(WINDOW_NAME, NO_CAMERA_FRAME)
-        if handle_key(window_key(cv2.waitKey(30)), "window") or \
-                any(handle_key(k, "terminal") for k in terminal_keys.poll()):
-            break
-        continue
-    if camera.take_size_changed() or old_gray is None or old_gray.shape != frame.shape[:2]:
-        reset_after_camera_change()
-        old_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        break
 
     current_time = time.time()
     frame_height, frame_width, _ = frame.shape
@@ -1700,6 +1635,7 @@ while True:
         _, enrol_tid, enrol_emb = max(enrol_candidates, key=lambda c: c[0])
         enrolment.add(enrol_emb)
         enrolment.track_id = enrol_tid
+        print(f"🙂 Face sample {len(enrolment.samples)}/{Enrolment.SAMPLES} for {enrolment.name}")
     if enrolment is not None and enrolment.finished(current_time):
         finish_enrolment(current_time)
     for old_tid in [t for t, d in live_people.items() if current_time - d["last_seen"] > 5]:

@@ -12,14 +12,11 @@ at most **two Python threads**: the main loop, plus a short-lived voice listener
 ```bash
 brew install portaudio            # macOS, needed by PyAudio
 pip install -r requirements.txt
-python sense_master.py                  # the camera you used last time (built-in Mac camera at first)
-python sense_master.py --camera camo    # Android phone through Camo Studio (remembered)
-python sense_master.py --camera builtin # back to the Mac camera
+python sense_master.py            # webcam 0
 python sense_master.py --source clip.mp4   # replay a recorded video (repeatable tests)
-python tools/find_cameras.py            # once: see which camera is which, pick with B / P
 ```
 
-Press **space** to talk, **c** to switch between the Mac camera and Camo, and **q** to quit. The keys
+Press **space** to talk and **q** to quit. The keys
 work in the video window **and** in the terminal SENSE was started from (no need to click the window). SENSE beeps; start speaking after the beep. You have
 about 5 seconds to start and 5 seconds to speak. The terminal prints how long each step took.
 
@@ -82,15 +79,12 @@ SENSE also speaks **on its own**:
 | `face_id.py` | **Face identity.** OpenCV YuNet finds the face, SFace turns it into 128 numbers; a name needs cosine similarity >= 0.363, a margin over everyone else, and a good frontal face. Enrolment collects 5 samples without blocking |
 | `people.py` | **Person naming gate.** Detection (YOLO) and tracking (ByteTrack) never say who someone is; a name is spoken only after a verified identity check agrees 3 of the last 5 times |
 | `memory_db.py` | SQLite tables: `environmental_memory` (latest state), `events` (history), `entities`, people and personal-item profiles, `settings`, `scene_snapshots` + `snapshot_items` (room snapshots) |
-| `camera_source.py` | **Which camera.** Finds the built-in camera or Camo by name (OpenCV numbers cameras by sorted uniqueID, so index 0 is not "the Mac camera"), normalises frames for YOLO (BGR, at most 1280 wide), notices a frozen picture, reconnects after unplugging and falls back to the Mac camera |
 | `voice_input.py` | **SPACE → beep → record → Whisper.** The listener thread; loads Whisper once, rejects Whisper's hallucinations (hint prompt echoed back, "no speech"), logs every press |
 | `key_input.py` | Keys from the terminal as well as the video window, without a thread (cbreak + `select`) |
 | `tests/` | Unit tests: `python -m unittest discover -s tests -v` |
 | `tools/run_checks.py` | **All automated checks in one command**: unit + regression tests, and full-app scenarios on clips made by `tools/make_test_videos.py` (walk towards objects, stand still, turn the head, walk to a door, introduce someone / leave / come back / strangers) |
 | `tools/smoke_run.py` | Runs the real app headless on a video and prints what it would have said (`--loop --stats-every 250 --json out.json` for long stress runs) |
 | `tools/stress_voice.py` | 10,000 SPACE presses through the real listener with random errors, silences, Whisper echoes and restarts |
-| `tools/camera_drill.py` | The real app with two fake live cameras: Camo 1080p hand-held, switching, unplugging, fallback |
-| `tools/find_cameras.py` | Lists and shows every camera; saves which one is the Mac camera and which is Camo |
 | `tools/stress_logic.py` | 10,000 randomised iterations of the continuity, naming, notifier and database logic with invariant checks |
 
 The other `.py` files in the root are earlier learning prototypes and are not used by the app.

@@ -164,3 +164,58 @@ class Listener(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SlowMicOnMac(unittest.TestCase):
+    """Field log from the Mac: "mic open after 1.54s" and Whisper heard only
+    'Sneha.'. PortAudio takes ~1 s to open. The person starts speaking when
+    they hear the beep, so the beep must come AFTER the microphone is open."""
+
+    def run_press(self, module):
+        clock = {"t": 0.0, "beep": None, "mic_open": None}
+        speech_len = 1.24                           # "This is Sneha"
+
+        class Mic:
+            def __init__(self, device_index=None):
+                pass
+
+            def __enter__(self):
+                clock["t"] += 1.0                     # PortAudio start-up on the Mac
+                clock["mic_open"] = clock["t"]
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+        class SR:
+            WaitTimeoutError = FakeSR.WaitTimeoutError
+            Microphone = Mic
+
+        class Rec:
+            energy_threshold = 300
+
+            def listen(self, source, timeout=None, phrase_time_limit=None):
+                speech_start = clock["beep"]          # the user talks right after the beep
+                missed = max(0.0, clock["mic_open"] - speech_start)
+                return missed
+
+            def recognize_whisper(self, missed, **kw):
+                # what Whisper gets depends on how much of the sentence was recorded
+                text = " This is Sneha." if missed < 0.1 else (" Sneha." if missed < speech_len else "")
+                return {"text": text, "segments": [{"no_speech_prob": 0.05, "avg_logprob": -0.3}]}
+
+        def beep():
+            clock["t"] += 0.3
+            clock["beep"] = clock["t"]
+
+        q = queue.Queue()
+        v = module.VoiceInput(SR, Rec(), q, get_prompt=lambda: PROMPT, play_cue=beep, stop_speech=lambda: None,
+                              log=lambda *a: None, clock=lambda: clock["t"], start_thread=lambda fn: fn())
+        v.press("window")
+        return q.get_nowait()
+
+    def test_whole_sentence_is_recorded_when_the_mic_is_slow(self):
+        kind, text = self.run_press(vi)
+        self.assertEqual(kind, "text")
+        self.assertEqual(answers.classify_intent(text.lower()), "LEARN", text)
+        self.assertEqual(answers.extract_name(text.lower()).strip(" .!?"), "sneha")
