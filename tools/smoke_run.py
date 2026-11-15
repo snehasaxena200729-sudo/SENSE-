@@ -123,7 +123,7 @@ class _LoopingCapture:
         return getattr(self.cap, k)
 cv2.VideoCapture = _LoopingCapture
 
-TABLES = ["live_memory", "live_people", "track_votes", "track_conf", "track_locked_identities",
+TABLES = ["live_memory", "live_people", "track_votes", "track_conf", "track_locked_identities", "track_last_seen",
           "active_people_crops", "active_object_crops", "face_eye_px", "last_db_write"]
 
 cv2.imshow = lambda *a, **k: None

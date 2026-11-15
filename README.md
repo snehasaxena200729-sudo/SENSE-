@@ -49,7 +49,7 @@ SENSE also speaks **on its own**:
     you have clearly moved away (beyond about 2.8 m) and come back. Standing still near something,
     turning your head past it, or someone reappearing closer does not trigger it.
   - A low object (a bed) that slides out of the bottom of the view while you walk towards it still
-    gets a warning ("low down, close ahead").
+    gets a warning ("Careful, a bed in front of you, close ahead").
   - Other YOLO classes: a warning when the box grows quickly in the middle of the view.
   - A camera-only "looming" check (`hazards.py`) works even for things YOLO has no name for, such as
     walls or boxes, by measuring how fast the image expands (time to contact).

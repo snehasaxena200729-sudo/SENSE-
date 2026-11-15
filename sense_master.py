@@ -178,6 +178,7 @@ print(f"🧩 Restored {sum(1 for e in resolver.entities.values() if e.get('name'
 # System States
 live_memory = {}
 track_votes = defaultdict(list)
+track_last_seen = {}       # tid -> last time ByteTrack reported it (to prune the per-track tables)
 track_locked_identities = {}
 active_people_crops = {}
 active_object_crops = {}
@@ -1137,6 +1138,7 @@ while True:
             raw_name = model.names[int(box.cls[0])]
             track_id = int(box.id[0])
             conf = float(box.conf[0])
+            track_last_seen[track_id] = current_time
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             center_x = int((x1 + x2) / 2)
             center_y = int((y1 + y2) / 2)
@@ -1399,7 +1401,12 @@ while True:
     # Roadmap E3: speak at most one (merged) announcement, only if it matters
     notifier.tick(camera_moving=is_camera_moving, hold=is_listening)
     approach.prune(current_time)
-    for old_tid in [t for t in track_conf if t not in track_votes]:
+    # Stress test (10,000 frames): track_votes / track_conf kept one entry per
+    # ByteTrack id ever seen and never shrank. Forget ids unseen for 30 s.
+    for old_tid in [t for t, ts in track_last_seen.items() if current_time - ts > 30]:
+        del track_last_seen[old_tid]
+        track_votes.pop(old_tid, None)
+    for old_tid in [t for t in track_conf if t not in track_votes and t not in track_last_seen]:
         del track_conf[old_tid]
 
     # -------------------------------------------------------------

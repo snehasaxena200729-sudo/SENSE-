@@ -310,7 +310,7 @@ class ObjectContinuity:
                     ahead = now - obj.last_seen + LOOKAHEAD_S
                     if obj.last_d * math.exp(-obj.closing_rate * ahead) <= NEAR_M:
                         obj.armed = False
-                        out.append((obj, "low down, close ahead"))
+                        out.append((obj, "close ahead"))
                 continue
             d = obj.current_distance(now)
             if d is None:
