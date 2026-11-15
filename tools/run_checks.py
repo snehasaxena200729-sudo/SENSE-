@@ -14,6 +14,9 @@ What this does NOT cover - see the physical test guide: the real webcam, the
 microphone and Whisper, the `say` voice, walking with the camera, lighting.
 """
 import argparse
+
+import cv2
+import numpy as np
 import json
 import os
 import re
@@ -267,6 +270,29 @@ def main():
             spoken = [f"[{f}] {t}" for f, t in run["spoken"][1:]]
             results.append((title, not errs, errs, f"{run['frames']} frames in {run['took']:.0f} s; said: "
                             + (" | ".join(spoken) or "nothing")))
+
+        still = os.path.join(args.videos, "still_near.mp4")
+        if os.path.exists(still):
+            # A real webcam's first frames are often black while it warms up. Optical
+            # flow finds no points there; SENSE once crashed on that (camera_dy NameError).
+            title = "camera warm-up: black first frames"
+            print(f"== Scenario: {title}")
+            clip = os.path.join(tempfile.mkdtemp(), "black_start.mp4")
+            cap = cv2.VideoCapture(still)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 15
+            ok, f = cap.read()
+            out = cv2.VideoWriter(clip, cv2.VideoWriter_fourcc(*"mp4v"), fps, (f.shape[1], f.shape[0]))
+            for _ in range(10):
+                out.write(np.zeros_like(f))
+            while ok:
+                out.write(f)
+                ok, f = cap.read()
+            out.release()
+            run = run_clip(clip, 60, ["what do you see@50"], "black_start")
+            errs = no_errors(run)
+            if run["frames"] < 59:
+                errs.append(f"only {run['frames']} frames ran")
+            results.append((title, not errs, errs, f"{run['frames']} frames; answer: {answer_to(run, 'what do you see')}"))
 
         people = os.path.join(args.videos, "people.mp4")
         if os.path.exists(people):
