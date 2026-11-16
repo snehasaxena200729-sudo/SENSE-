@@ -258,6 +258,13 @@ def main():
     results.append(("interactive questions stress test", r.returncode == 0,
                     [] if r.returncode == 0 else tail[-15:], (tail[-1] if tail else "?") + " (10,000 cases)"))
 
+    print("== Personal items: 10,000-case stress test (tools/stress_personal.py)")   # "my cup" = one cup
+    r = subprocess.run([sys.executable, os.path.join("tools", "stress_personal.py")], cwd=ROOT,
+                       capture_output=True, text=True)
+    tail = (r.stdout or r.stderr).strip().splitlines()
+    results.append(("personal items stress test", r.returncode == 0,
+                    [] if r.returncode == 0 else tail[-15:], tail[-1] if tail else "?"))
+
     if args.videos:
         n = args.name
         ea, eb = args.event_names
