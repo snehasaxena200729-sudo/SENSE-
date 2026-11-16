@@ -1,4 +1,9 @@
-"""The OCR workflow with a fake engine and a fake clock (fast, no Tesseract needed)."""
+"""The OCR workflow with a fake engine and a fake clock (fast, no Tesseract needed).
+
+These tests cover the WHOLE-FRAME path (use_text_detection=False): it is still
+used by reading mode ("keep reading"), as the fallback when no text region is
+found, and when text detection is switched off. The text-detection path of
+"read this" is tested in test_target_reading.py."""
 import threading
 import unittest
 
@@ -13,7 +18,8 @@ BLURRY = scene(["EXIT"], blur=21)
 def make(result_words=None, **engine_kw):
     clock = Clock()
     eng = FakeEngine(clock, result_words or words(("EXIT", 95)), **engine_kw)
-    return OCRController(engine=eng, clock=clock, log=lambda *_: None), eng, clock
+    return OCRController(config=OCRConfig(use_text_detection=False), engine=eng, clock=clock,
+                         log=lambda *_: None), eng, clock
 
 
 def run(ctrl, clock, frames, dt=0.1, moving=False, can_speak=True):

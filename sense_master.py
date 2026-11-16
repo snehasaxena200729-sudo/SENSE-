@@ -1366,6 +1366,8 @@ while True:
                 break
         if not conflict:
             filtered_candidates.append(cand)
+    if ocr is not None and should_run_yolo:   # "read this" uses them to know which object holds the text
+        ocr.set_objects([(c["name"], c["box"]) for c in filtered_candidates])
 
     # -------------------------------------------------------------
     # SUB-SYSTEM D: DUAL-TIER OBJECT & PERSON RE-ID
@@ -1631,6 +1633,8 @@ while True:
             cv2.rectangle(frame, (hx1, hy1), (hx2, hy2), (200, 0, 200), 2)
             cv2.putText(frame, hz_name.title(), (hx1, max(15, hy1 - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 0, 200), 2)
+    if ocr is not None:   # text boxes, only for a few seconds after "read this" / R
+        ocr.draw(frame, current_time)
     cv2.imshow("SENSE Master Assistive System", frame)
 
     key = cv2.waitKey(1) & 0xFF

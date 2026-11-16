@@ -26,7 +26,7 @@ python3 tools/run_checks.py     # about 15 s; must end with "0 failed."
 - [ ] All offline models are on disk (each line must print a file, not "No such file"):
 
 ```bash
-ls -la yolov8s.pt yolov8n-oiv7.pt models/*.onnx ~/.cache/whisper/tiny.pt
+ls -la yolov8s.pt yolov8n-oiv7.pt models/*.onnx models/frozen_east_text_detection.pb ~/.cache/whisper/tiny.pt
 ```
 
 If one is missing, start SENSE once **with Wi-Fi on** (step 3) and it downloads itself.
@@ -55,6 +55,7 @@ print('heard:', r.recognize_whisper(a, model='tiny'))"
   - `🚪 Door/stairs detection on: ['door', 'door handle', 'stairs']`
   - `🙂 Face recognition on. People enrolled by face: ...`
   - `📖 Text reading ready (Tesseract: ...)`
+  - `📖 Text detector: EAST` (if it says `classic`, the EAST model is missing: start once with Wi-Fi on)
 - [ ] You hear: **"Sense Master Online. Restored N objects and M people."**
   If it adds "... taught with the old clothing method", those names can't be recognised. Before the
   demo say **"Forget Sneha"** (for each such name; this also deletes a face profile of that name)
@@ -121,6 +122,10 @@ SENSE only updates its memory while the camera is still ("CAM MOVING" in red = i
 ### F. Reading text (2 min)
 - [ ] Hold the printed page **20 to 30 cm** from the camera, flat, text filling about half the picture, good light.
 - [ ] Say **"Read this"** (or press **R**) → "Reading. Hold it steady." then "It says: ...".
+  The video shows yellow boxes on every text block and a green box on the one SENSE is reading.
+- [ ] Show the guidance: hold the page far away and press **R** → "The text is too small. Move it closer to the camera."
+  (or another tip such as "Hold it still for a second"). SENSE never reads out a guess.
+- [ ] Two separate signs side by side, same size → "I can see text in more than one place. Hold the one you want in the middle ...".
 - [ ] Medicine box: front of the box (big product name) first. Say **"Read this"**.
   If SENSE adds "Some words were unclear, so please check it, especially any numbers." that is the
   intended honest behaviour: point it out, never present a dose as certain.
