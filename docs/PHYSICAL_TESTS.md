@@ -102,6 +102,38 @@ python tools/validate_distance.py --live --distances 1 1.5 2 3 --person-height <
 Expected: a table of true distance against estimate. Most rows should say "yes" under "in range?".
 After `--save`, SENSE prints "📏 Distance: calibrated focal length." on the next start.
 
+## 5b. Door distance (tape measure, about 20 minutes)
+
+Spoken distances are ESTIMATES from one camera; this test measures how wrong they are.
+Put tape marks on the floor at 2, 4, 6 and 8 ft from a closed door. Measure from the door
+to the laptop camera lens, not to your feet.
+
+```bash
+python tools/door_distance_test.py --calibrate --distance-ft 6          # once, at the 6 ft mark
+python tools/door_distance_test.py --test --label facing                # stand on each mark, SPACE
+python tools/door_distance_test.py --test --label side                  # each mark, 2 ft to the side
+python tools/door_distance_test.py --test --label half-hidden           # a chair hiding the lower half
+python tools/door_distance_test.py --test --label dim                   # lights dimmed
+python tools/door_distance_test.py --test --label other-door            # a different (dark / white / wider) door
+```
+
+Each run appends to `door_distance_results.csv` and prints an error table.
+
+| Check | Expected |
+| --- | --- |
+| Start-up line | "🚪📏 Door distance: calibrated." after `--calibrate` |
+| 4 / 6 / 8 ft, facing | Within about +-15% (8 ft reads 7 to 9) |
+| 2 ft | "very close, less than about 3 feet" or "cannot estimate reliably", never a wrong number |
+| Side / half-hidden | Either a number within about +-25%, or "cannot estimate reliably" |
+| Walk from 10 ft to the door (`python sense_master.py`) | "Door detected approximately 10 feet ahead", then "The door is approximately ..." a few times, the numbers going down, at most one every 2 s, plus the usual "Careful, a door ..." near 5 ft |
+| Walk away again | Numbers going up |
+| Turn away 5 s and back | The door is NOT announced again; "where is the door?" while turned away says "I can't see the door right now. When I last saw it ..." |
+| Stand still 30 s at 5 ft | Nothing repeated |
+
+The terminal prints a line every second while a door is in view, for example
+`🚪📏 door#3 raw 5.2 ft (width, +-12%) -> 5.0 ft`. The camera window shows "~5 ft (est, width)"
+under the purple door box. Send back the CSV and these lines for any failure.
+
 ## 6. Long run
 
 Leave SENSE running for 30 minutes in a room where people come and go.
