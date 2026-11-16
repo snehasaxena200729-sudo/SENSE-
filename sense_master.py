@@ -24,6 +24,7 @@ from continuity import ObjectContinuity
 from face_id import FaceID, Enrolment, decide as face_decide
 from guidance import FindGuide
 import whereabouts
+from heading_fusion import TurnEstimator
 
 # =====================================================================
 # 1. INITIALIZATION & SETUP
@@ -156,6 +157,7 @@ last_frame_time = None
 track_conf = {}                                          # tid -> smoothed detector confidence
 guide = FindGuide()                                      # "find my bottle" guidance (guidance.py)
 item_whereabouts = whereabouts.create(SESSION_ID)        # "on the table, left of the laptop" (whereabouts/)
+turn_estimator = TurnEstimator()                         # keeps the heading right in quick turns (heading_fusion.py)
 guide_target = None                                      # {"kind": item|person|door|stairs, "name": ...}
 last_guide_seen = (0.0, [])                              # (time, observations) of the last YOLO frame
 
@@ -672,13 +674,16 @@ def answer_voice_query(user_text):
     where, turn_hint, same_session = location_words(db_record)
     if person_since:
         # people walk around: report the last verified sighting, never "probably still there"
-        speak(f"I last recognised {name} {answers.format_time_ago(age)}, {where}. I can't see them now.")
+        speak((turn_estimator.since_sentence(db_record["name"], name) if same_session else "") +
+              f"I last recognised {name} {answers.format_time_ago(age)}, {where}." +
+              (f" To face where they were, {turn_hint}." if turn_hint else "") + " I can't see them now.")
         return
     relation = memory_relation(db_record) if same_session else None
     anchored = item_whereabouts.describe(db_record, name, age, where, same_session, turn_hint)
     sentence, level, score = anchored or answers.describe_memory(
         name, age, db_record.get("status"), where, same_session, turn_hint, relation)
     sentence += "" if anchored else item_whereabouts.stale_note(db_record, current_time)
+    sentence = (turn_estimator.since_sentence(db_record["name"], name) if same_session else "") + sentence
     print(f"🎯 Confidence {score:.2f} ({level})")
     speak(sentence[0].upper() + sentence[1:])
 
@@ -1199,6 +1204,7 @@ while True:
     camera_dx = 0.0
     camera_dy = 0.0
     camera_speed = 0.0
+    lk_points = 0
 
     if p0 is not None and len(p0) > 0:
         p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
@@ -1211,10 +1217,7 @@ while True:
                 camera_dx = np.median(displacements[:, 0])
                 camera_dy = np.median(displacements[:, 1])
                 camera_speed = (camera_dx**2 + camera_dy**2)**0.5
-                
-                deg_shift = -camera_dx * (65.0 / float(frame_width))
-                cumulative_camera_heading += deg_shift
-                cumulative_camera_heading = ((cumulative_camera_heading + 180.0) % 360.0) - 180.0
+                lk_points = len(good_new)
 
                 if len(good_new) < 60:
                     fresh_pts = cv2.goodFeaturesToTrack(frame_gray, mask=bg_mask, **feature_params)
@@ -1230,6 +1233,10 @@ while True:
         p0 = cv2.goodFeaturesToTrack(frame_gray, mask=bg_mask, **feature_params)
 
     old_gray = frame_gray.copy()
+    # Heading: LK as before, phase correlation when a quick turn defeats LK (heading_fusion.py)
+    heading_dx = turn_estimator.update(frame_gray, camera_dx, lk_points)
+    cumulative_camera_heading = spatial.wrap_angle(
+        cumulative_camera_heading + turn_estimator.add_turn(-heading_dx * (65.0 / float(frame_width))))
 
     # Sudden obstacle, any kind (wall, door, box, hand): optical-flow looming
     frame_dt = (current_time - last_frame_time) if last_frame_time else 0.0
@@ -1546,6 +1553,7 @@ while True:
                     dist_feet=obs["dist_feet"], seen_at=current_time)
                 last_db_write[name] = current_time
     item_whereabouts.observe(frame_observations, current_time, frame_width, frame_height, camera_is_stable)
+    turn_estimator.note_seen(frame_observations)
 
     # Persist newly named object identities (rare) and free old track buffers
     for eid, ent in resolver.pop_dirty():
