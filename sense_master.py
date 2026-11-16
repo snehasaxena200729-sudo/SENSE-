@@ -492,6 +492,17 @@ def answer_voice_query(user_text):
     intent = answers.classify_intent(user_text)   # Roadmap E6 (rule-based, offline)
     print(f"🧭 Intent: {intent}")
 
+    # Safety net: only ONE word heard (just a name) while a person is in front of
+    # the camera is most likely a clipped "this is Sneha" (spoken before the beep).
+    # Don't guess either way: tell the user exactly what was heard and how to retry.
+    lone = user_text.strip(" .,!?")
+    object_words = set(ALLOWED_ITEMS.values()) | {w for n in known_objects for w in n.split()}
+    if (intent == "WHERE" and lone and " " not in lone and lone not in object_words
+            and active_people_crops):
+        speak(f"I only heard {lone}. To introduce someone, press space, wait for the beep, "
+              f"then say: this is {lone.capitalize()}.")
+        return
+
     # Intent A: Name Learning ("This is Sneha", "This is my water bottle")
     if intent == "LEARN":
         extracted = extract_name_from_speech(user_text)
@@ -1079,13 +1090,18 @@ def listen_in_background():
     t0 = time.time()
     try:
         subprocess.run(["killall", "say"], stderr=subprocess.DEVNULL)
-        if os.path.exists(EARCON):
-            subprocess.run(["afplay", EARCON], timeout=2, stderr=subprocess.DEVNULL)
-        else:  # non-Mac fallback: a very short spoken cue, finished before the mic opens
-            subprocess.run(["say", "-r", str(speech_rate), "Yes?"], timeout=3)
+        # Bug fix ("this is Sneha" heard as just the name): opening the Mac microphone
+        # takes ~1 s. We used to beep FIRST, so the user started talking while the
+        # mic was still closed and "This is" was lost. Now the mic is opened first
+        # and the beep means "the mic is already recording".
         with sr.Microphone() as source:
             t_mic = time.time()
-            print(f"\n🎙️ Listening now... (mic open after {t_mic - t0:.2f}s)")
+            if os.path.exists(EARCON):
+                subprocess.run(["afplay", EARCON], timeout=2, stderr=subprocess.DEVNULL)
+            else:  # non-Mac fallback: a very short spoken cue
+                subprocess.run(["say", "-r", str(speech_rate), "Yes?"], timeout=3)
+            print(f"\n🎙️ Listening now... (mic open after {t_mic - t0:.2f}s, beep done after "
+                  f"{time.time() - t0:.2f}s)")
             audio = recognizer.listen(source, timeout=LISTEN_START_TIMEOUT_S,
                                       phrase_time_limit=LISTEN_MAX_PHRASE_S)
         t_rec = time.time()
