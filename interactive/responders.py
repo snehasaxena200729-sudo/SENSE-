@@ -359,6 +359,8 @@ def describe_answer(q, snap, now, hooks, ctx):
         return stale_sentence(snap, now)
     if items is None:
         pool = visible(snap, now)
+        if q.side and any(i.side == q.side for i in pool):
+            pool = [i for i in pool if i.side == q.side]     # "the object in front of me"
         if q.handheld:
             pool = [i for i in pool if i.cls in HANDHELD]
         item = centre_object(pool, people=not q.handheld)

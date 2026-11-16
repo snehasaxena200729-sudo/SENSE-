@@ -143,7 +143,7 @@ class InteractiveQA:
 
     def say(self, text, now=None):
         now = self.clock() if now is None else now
-        text = T.sentence(text)
+        text = T.sentence(text).replace("on your right right now", "on your right at the moment")
         if self._must_wait():
             self.held = (text, now)       # spoken by poll() when the safety alert ends
             self.log(f"💬 Answer waits for a safety alert: '{text}'")
