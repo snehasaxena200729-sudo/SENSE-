@@ -89,3 +89,89 @@ def prepare(frame, config):
     img = ensure_dark_text(img)
     img = binarize(img, config.binarize)
     return img, score
+
+
+# ---------------------------------------------------------------------------
+# Crop preprocessing (text detection path). A crop holds ONE text block, so the
+# steps that break whole frames (hard thresholds on background texture) can be
+# tried here. Instead of one fixed pipeline there are small "recipes"; the
+# controller tries up to config.max_attempts of them and keeps the best reading.
+#
+#   clahe     today's recipe: local contrast boost (works on most clean prints)
+#   sharpen   unsharp mask: image + 0.8 * (image - blurred image). Restores
+#             edges softened by slight defocus or motion. Amplifies noise too,
+#             so it is not first on grainy images.
+#   otsu      one global black/white threshold picked from the histogram.
+#             Good for high-contrast labels; removes faint background print.
+#   adaptive  a threshold per neighbourhood (block size ~ 1.5 letter heights),
+#             for labels with a shadow across them.
+#   denoise   non-local means: replaces each pixel by an average of pixels
+#             whose SURROUNDING PATCH looks similar, so letter edges survive
+#             while sensor grain (dim rooms) is smoothed. ~20-60 ms on a crop.
+#
+# All recipes end with "dark text on light" polarity and a white border:
+# Tesseract's line finder works better when text does not touch the edge.
+# ---------------------------------------------------------------------------
+
+def scale_to_letter_height(gray, letter_h, target_px, max_side):
+    """Resize so letters are about target_px tall (Tesseract's sweet spot)."""
+    if letter_h <= 0:
+        return gray, 1.0
+    s = target_px / float(letter_h)
+    h, w = gray.shape[:2]
+    s = min(s, max_side / float(max(h, w)))
+    s = max(s, 0.25)
+    if abs(s - 1.0) < 0.05:
+        return gray, 1.0
+    interp = cv2.INTER_CUBIC if s > 1 else cv2.INTER_AREA
+    return cv2.resize(gray, (max(1, int(round(w * s))), max(1, int(round(h * s)))), interpolation=interp), s
+
+
+def unsharp(gray, amount=0.8, sigma=1.5):
+    blurred = cv2.GaussianBlur(gray, (0, 0), sigma)
+    return cv2.addWeighted(gray, 1 + amount, blurred, -amount, 0)
+
+
+def denoise(gray):
+    return cv2.fastNlMeansDenoising(gray, None, h=12, templateWindowSize=7, searchWindowSize=21)
+
+
+def adaptive(gray, letter_px):
+    block = int(letter_px * 1.5) | 1
+    return cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
+                                 max(block, 15), 10)
+
+
+def image_stats(gray):
+    """Brightness, grain and shadow numbers used to order the recipes."""
+    mean = float(np.mean(gray))
+    noise = float(np.std(gray.astype(np.int16) - cv2.medianBlur(gray, 3).astype(np.int16)))
+    k = max(3, (min(gray.shape[:2]) // 4) | 1)
+    illum = cv2.GaussianBlur(gray, (k, k), 0).astype(np.float32)
+    uneven = float(np.std(illum) / (np.mean(illum) + 1e-6))
+    return {"mean": mean, "noise": noise, "uneven": uneven}
+
+
+def plan_recipes(stats):
+    """Recipe names in the order to try them (decided from tools/ocr_eval.py runs)."""
+    if stats["mean"] < 70 or stats["noise"] > 9:
+        return ["denoise", "clahe", "otsu"]
+    if stats["uneven"] > 0.25:
+        return ["clahe", "adaptive", "sharpen"]
+    return ["clahe", "sharpen", "otsu"]
+
+
+def apply_recipe(name, gray, letter_px):
+    if name == "denoise":
+        img = enhance_contrast(denoise(gray))
+    elif name == "sharpen":
+        img = unsharp(enhance_contrast(gray))
+    elif name == "otsu":
+        img = binarize(enhance_contrast(gray), "otsu")
+    elif name == "adaptive":
+        img = adaptive(enhance_contrast(gray), letter_px)
+    else:
+        img = enhance_contrast(gray)
+    img = ensure_dark_text(img)
+    pad = max(10, int(letter_px))
+    return cv2.copyMakeBorder(img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=255), pad

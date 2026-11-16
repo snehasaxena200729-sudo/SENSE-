@@ -13,12 +13,12 @@ from ocr.tests.helpers import Clock, FakeEngine, scene, words
 from ocr.text_filter import is_unclear
 
 SHARP = scene(["EXIT"])
-CFG = OCRConfig()
+CFG = OCRConfig(use_text_detection=False)   # wording of the whole-frame answer
 
 
 def read_once(result_words):
     clock = Clock()
-    ctrl = OCRController(engine=FakeEngine(clock, result_words), clock=clock, log=lambda *_: None)
+    ctrl = OCRController(config=CFG, engine=FakeEngine(clock, result_words), clock=clock, log=lambda *_: None)
     ctrl.handle_command("read this", clock.t)
     for _ in range(100):
         clock.t += 0.1
