@@ -27,6 +27,15 @@ ALLOWED_CAPS = {"I", "SENSE", "AM", "PM", "OK", "TV", "Sorry", "Yes", "No", "Mon
                 "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "January", "February",
                 "March", "April", "May", "June", "July", "August", "September", "October",
                 "November", "December"}
+# Ordinary words a sentence may start with. A capitalised word that is neither
+# one of these nor in the facts is treated as an invented name ("Rahul is here").
+STARTERS = set("""i the there it its you your yes no sorry a an this that these those they them he she
+we on in to from at when earlier right now currently nothing nobody no one two three four five some
+someone something anything everything all both only just also but and or so if not however please
+here where what who which how why last before after today it's i'm i'd i've there's that's let let's
+maybe probably perhaps unfortunately well okay ok hmm about around near next behind ahead straight
+left turn walk go look ask try with without as for of by up down over under between inside outside
+my mine our their his her yes my nothing""".split())
 KNOWN_NAME_HINTS = set()   # filled by qa.py with every name SENSE has ever learned
 PERSON_WORDS = {w for w, c in T.CLASS_WORDS.items() if c == "person"}
 
@@ -61,19 +70,45 @@ def check(answer, facts):
             return False, f"colour not in facts: {w}"
         if w in NUMBER_WORDS and str(NUMBER_WORDS[w]) not in f and w not in fw:
             return False, f"number not in facts: {w}"
+    counts = _counts(f)
+    for m in re.finditer(r"\b(\d+|" + "|".join(NUMBER_WORDS) + r")\s+([a-z]+)(?:\s+([a-z]+))?", answer.lower()):
+        n = int(m.group(1)) if m.group(1).isdigit() else NUMBER_WORDS[m.group(1)]
+        noun = m.group(2)
+        if noun not in T.CLASS_WORDS and noun not in ("things", "objects", "items") and m.group(3):
+            noun = m.group(3)            # "two black chairs", "3 big things"
+        cls = T.CLASS_WORDS.get(noun)
+        if noun in ("things", "objects", "items"):
+            if n != sum(counts.values()):
+                return False, f"wrong total: {n}"
+        elif cls is not None and cls != "person" and counts.get(cls, 0) != n:
+            return False, f"wrong count: {n} {noun}"      # counts are only known for what is in view
+        elif cls == "person" and noun != "minutes" and counts.get("person", 0) != n:
+            return False, f"wrong count: {n} {noun}"
     for num in re.findall(r"\d+", answer):
         if not re.search(rf"(?<!\d){num}(?!\d)", f):
             return False, f"number not in facts: {num}"
     for m in re.finditer(r"[A-Za-z]+", answer):
         w = m.group(0)
         starts_sentence = re.fullmatch(r"\s*|.*[.!?:;]\s*", answer[:m.start()]) is not None
-        if w[0].isupper() and not starts_sentence and w not in ALLOWED_CAPS and w.lower() not in fw:
+        if w[0].isupper() and w not in ALLOWED_CAPS and w.lower() not in fw \
+                and not (starts_sentence and w.lower() in STARTERS):
             return False, f"name not in facts: {w}"
     for name in re.findall(r"\b([A-Z][a-z]+)\b", answer):
         # a sentence-initial name ("Rahul is here.") still has to be a known word
         if name.lower() not in fw and name not in ALLOWED_CAPS and name.lower() in KNOWN_NAME_HINTS:
             return False, f"name not in facts: {name}"
     return True, "ok"
+
+
+def _counts(facts_lower):
+    m = re.search(r"counts in view: (.*)", facts_lower)
+    out = {}
+    if m:
+        for part in m.group(1).split(","):
+            bits = part.strip().rsplit(" ", 1)
+            if len(bits) == 2 and bits[1].isdigit():
+                out[bits[0]] = int(bits[1])
+    return out
 
 
 FALLBACK = ("I'm not sure about that. You can ask me what I see, where something is, "

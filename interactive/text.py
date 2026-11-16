@@ -4,6 +4,7 @@ interactive/text.py - normalising what Whisper wrote, and the words SENSE knows.
 Whisper writes "What's the colour of the bottel?" as often as "what is the
 color of the bottle". Everything downstream works on one normalised form.
 """
+import difflib
 import re
 
 COLOUR_WORDS = ("red", "orange", "yellow", "green", "cyan", "blue", "purple",
@@ -72,11 +73,23 @@ def words(text):
     return normalise(text).split()
 
 
+_NOT_CLASS = {"there", "three", "these", "those", "where", "chain", "chat", "cap", "stars", "stays",
+              "table's", "people's", "cups", "pairs", "chairs"}
+
+
 def class_in(text):
-    """First detectable class named in the text ('how many chairs' -> 'chair')."""
-    for w in words(text):
+    """First detectable class named in the text ('how many chairs' -> 'chair').
+    Whisper misspellings ('bottels', 'chiars') are matched with difflib, the
+    same Ratcliff/Obershelp similarity answers.fuzzy_find uses for names."""
+    ws = words(text)
+    for w in ws:
         if w in CLASS_WORDS:
             return CLASS_WORDS[w]
+    for w in ws:
+        if len(w) >= 5 and w not in _NOT_CLASS:
+            m = difflib.get_close_matches(w, list(CLASS_WORDS), n=1, cutoff=0.8)
+            if m:
+                return CLASS_WORDS[m[0]]
     return None
 
 

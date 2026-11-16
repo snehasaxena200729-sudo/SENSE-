@@ -103,9 +103,12 @@ def read_colour(crop, name_fn, box=None, frame_w=None, frame_h=None, scene_v=Non
         share = 1.0 - coloured
     elif name:
         share = shares.get(name, 0.0)
-        others = sorted(((v, k) for k, v in shares.items() if k != name), reverse=True)
-        if share < C.AMBIGUOUS_SHARE and others and others[0][0] >= C.RUNNER_UP_SHARE:
-            alternative, status = others[0][1], "ambiguous"
+        ranked = sorted(((v, k) for k, v in shares.items()), reverse=True)
+        if share < C.AMBIGUOUS_SHARE and len(ranked) > 1 and ranked[1][0] >= C.RUNNER_UP_SHARE:
+            # two real hues (half blue, half green): the median hue of the existing
+            # classifier lands BETWEEN them ("cyan"), so name the two that are there
+            name, alternative, status = ranked[0][1], ranked[1][1], "ambiguous"
+            share = ranked[0][0]
     else:
         return ColourReading("none")
     if box is not None and frame_w and is_cut_off(box, frame_w, frame_h):

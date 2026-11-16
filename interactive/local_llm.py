@@ -28,14 +28,17 @@ class Job:
     def done(self):
         return self.proc.poll() is not None
 
-    def result(self):
-        """(text or None, error or None). Call only when done()."""
+    def result(self, raw=False):
+        """(text or None, error or None). Call only when done().
+        raw=True returns the whole JSON text (for /api/tags)."""
         try:
             out, err = self.proc.communicate(timeout=1)
         except Exception as e:      # pragma: no cover
             return None, f"read failed: {e}"
         if self.proc.returncode != 0:
             return None, f"curl exit {self.proc.returncode}" + (": timeout" if self.proc.returncode == 28 else "")
+        if raw:
+            return out.decode("utf-8", "replace"), None
         try:
             data = json.loads(out.decode("utf-8", "replace") or "{}")
         except ValueError:
@@ -88,8 +91,9 @@ class OllamaLLM:
         """Called every frame (cheap): finishes the start-up probe and warm-up."""
         if self._probe is not None and self._probe.done():
             proc, self._probe = self._probe, None
-            text, err = proc.result()
-            if err is not None:
+            text, err = proc.result(raw=True)
+            if err is not None or not text:
+                err = err or "no reply"
                 self.state = "no_server"
                 self.log(f"💬 Local AI model off: Ollama is not running ({err}). "
                          f"Start the Ollama app, then restart SENSE. Rule-based answers still work.")
