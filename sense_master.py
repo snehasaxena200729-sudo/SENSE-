@@ -497,6 +497,14 @@ def answer_voice_query(user_text):
     # Don't guess either way: tell the user exactly what was heard and how to retry.
     lone = user_text.strip(" .,!?")
     object_words = set(ALLOWED_ITEMS.values()) | {w for n in known_objects for w in n.split()}
+
+    # Mac test 2: Whisper heard "Is Sneha." / "Listen, is Sneha." for "This is Sneha".
+    # With a person on camera, a clipped "this is <name>" is an introduction.
+    intro = answers.parse_introduction(user_text) if intent == "WHERE" else None
+    if intro and intro not in object_words and active_people_crops:
+        print(f"🧭 Read as an introduction: this is {intro}")
+        learn_person(intro.capitalize())
+        return
     if (intent == "WHERE" and lone and " " not in lone and lone not in object_words
             and active_people_crops):
         speak(f"I only heard {lone}. To introduce someone, press space, wait for the beep, "
@@ -1096,12 +1104,16 @@ def listen_in_background():
         # and the beep means "the mic is already recording".
         with sr.Microphone() as source:
             t_mic = time.time()
+            # Mac test 2: a BLOCKING afplay took ~1.4 s (player start-up), and the mic
+            # was not being read meanwhile, so "This" was dropped again. Start the beep
+            # in the background (a short-lived process, not a Python thread) and start
+            # recording at once: everything from the moment the mic opened is kept.
             if os.path.exists(EARCON):
-                subprocess.run(["afplay", EARCON], timeout=2, stderr=subprocess.DEVNULL)
+                subprocess.Popen(["afplay", EARCON], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
             else:  # non-Mac fallback: a very short spoken cue
-                subprocess.run(["say", "-r", str(speech_rate), "Yes?"], timeout=3)
-            print(f"\n🎙️ Listening now... (mic open after {t_mic - t0:.2f}s, beep done after "
-                  f"{time.time() - t0:.2f}s)")
+                subprocess.Popen(["say", "-r", str(speech_rate), "Yes?"])
+            print(f"\n🎙️ Listening now... (mic open after {t_mic - t0:.2f}s, recording)")
             audio = recognizer.listen(source, timeout=LISTEN_START_TIMEOUT_S,
                                       phrase_time_limit=LISTEN_MAX_PHRASE_S)
         t_rec = time.time()

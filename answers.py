@@ -61,6 +61,40 @@ def classify_intent(text):
     return "WHERE"
 
 
+# Words Whisper adds or mishears in front of "is <name>" when the start of
+# "this is Sneha" is clipped or masked by the beep (krish's Mac log:
+# "Is Sneha." and "Listen, is Sneha.").
+INTRO_FILLERS = {"this", "dis", "thiss", "these", "it", "its", "that", "here", "his",
+                 "listen", "so", "ok", "okay", "hey", "and", "well", "yes", "um", "uh", "sense"}
+QUESTION_WORDS = {"where", "who", "what", "when", "how", "which", "find", "did", "was", "were"}
+
+
+def parse_introduction(text):
+    """'is sneha' / 'listen, is sneha' / "this's sneha" -> 'sneha', else None.
+
+    Only for transcripts that look like a clipped "this is <name>": the words
+    before "is" must all be filler words, and the name must be the last word.
+    So "where is sneha", "is sneha here" and "the phone is red" return None.
+    The caller still requires a person on camera and a name that is not an object.
+    """
+    t = text.lower().replace(",", " ").replace("’", "'").strip(" .!?")
+    words = t.split()
+    if not words or any(w in QUESTION_WORDS for w in words):
+        return None
+    if len(words) >= 2 and words[-2] in ("is", "iz", "'s"):
+        before, name = words[:-2], words[-1]
+    elif len(words) == 2 and words[0] in ("this's", "it's", "that's", "dis's"):
+        before, name = [], words[-1]
+    else:
+        return None
+    if len(before) > 2 or any(w not in INTRO_FILLERS for w in before):
+        return None
+    name = name.strip(" .!?'")
+    if len(name) < 2 or not name.isalpha() or name in INTRO_FILLERS:
+        return None
+    return name
+
+
 def parse_rename(text):
     """'rename my bottle to my medicine' -> ('my bottle', 'my medicine').
 
