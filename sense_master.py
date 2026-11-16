@@ -270,6 +270,26 @@ except Exception as e:
     ocr = None
     print(f"📖 Text reading off ({e})")
 
+try:  # optional question answering (interactive/ package). It only READS what this loop
+    import interactive  # computes; SENSE runs exactly as before without it.
+    qa = interactive.create(dict(
+        speak=lambda text: speak(text), is_speaking=lambda: is_speaking(),
+        p1_talking=lambda: is_speaking() and time.time() - notifier.last_p1_at < 6.0,
+        is_listening=lambda: is_listening, colour_name=lambda crop: get_dominant_color_name(crop),
+        heading=lambda: cumulative_camera_heading, session_id=SESSION_ID,
+        classify=answers.classify_intent, find_target=lambda t: find_target(t),
+        ocr_owns=lambda t: ocr is not None and ocr.match_command(t) is not None,
+        ocr_read=lambda now: ocr.handle_command("read this", now) if ocr is not None else None,
+        spoken_name=lambda n: spoken_name(n), known_people=lambda: list(known_people),
+        unverified=lambda: unverifiable_people(), memory=memory_db,
+        scene_visible=lambda now: scene_hazards.visible(now) if scene_hazards is not None else {},
+        doors=lambda now: [(st.angle, door_ranger.describe_visible(st, now, globals().get("frame_width", 1280),
+                                                                   globals().get("f_px"))[0])
+                           for st in door_ranger.visible_doors(now)] if scene_hazards is not None else []))
+except Exception as e:
+    qa = None
+    print(f"💬 Interactive questions off ({e})")
+
 def get_spatial_zone_from_x(x_coordinate, frame_width=640):
     third = frame_width / 3.0
     if x_coordinate < third:
@@ -496,6 +516,11 @@ def answer_voice_query(user_text):
     if ocr_reply:  # "read this" / "keep reading" / "stop reading"; anything else goes on below
         speak(ocr_reply)
         return
+    qa_reply = qa.handle(user_text, current_time) if qa is not None else None
+    if qa_reply is not None and qa_reply.kind == "spoken":   # colour, how many, left/right... (interactive/)
+        return
+    if qa_reply is not None and qa_reply.kind == "rewrite":  # "where is it?" -> "where is the bottle"
+        user_text = qa_reply.text
     intent = answers.classify_intent(user_text)   # Roadmap E6 (rule-based, offline)
     print(f"🧭 Intent: {intent}")
 
@@ -649,6 +674,8 @@ def answer_voice_query(user_text):
     # Intents WHERE / WHEN / PREVIOUS need a target item or person
     found_target = find_target(user_text)
     if not found_target:
+        if qa is not None and qa.free_form(user_text, current_time):   # local AI model, offline
+            return
         speak("I heard you, but I did not catch which item or person you asked about.")
         return
 
@@ -1501,6 +1528,9 @@ while True:
 
             dist_feet = distance.feet_or_none(est)     # None when unknown
             dist_phrase = distance.phrase(est)         # a range or a band, never false precision
+            if qa is not None:   # read-only copy of this sighting for questions (interactive/)
+                qa.see(tid, winner_name, display_name, verified if winner_name == "person" else None,
+                       (x1, y1, x2, y2), crop, dist_phrase, est.metres, frame_width, frame_height)
 
             # Update Live Memory (Roadmap E4: every observation gets a WORLD angle)
             if camera_is_stable and display_name == "Person":
@@ -1599,6 +1629,8 @@ while True:
     # Only on frames where a detector ran (a skipped frame is not "not seen").
     if should_run_yolo:
         last_guide_seen = (current_time, guide_seen)
+        if qa is not None:
+            qa.frame_done(current_time, frame_width, frame_height, frame_gray)
         if guide.active and guide_target["kind"] in ("item", "person"):
             guide.observe(current_time, [o for o in guide_seen if guide_matches(o)], cumulative_camera_heading)
     if guide.active and guide_target["kind"] in ("door", "stairs") and scene_hazards is not None \
@@ -1622,6 +1654,8 @@ while True:
         if cue:
             print(f"🧭 Guide: {cue}")
             speak(cue)
+    if qa is not None:   # held answers / local AI model reply; waits while a safety alert talks
+        qa.poll(current_time)
     approach.prune(current_time)
     # Stress test (10,000 frames): track_votes / track_conf kept one entry per
     # ByteTrack id ever seen and never shrank. Forget ids unseen for 30 s.
@@ -1675,6 +1709,8 @@ for eid, ent in resolver.entities.items():
 memory_db.close()
 if ocr is not None:
     ocr.close()
+if qa is not None:
+    qa.close()
 
 camera.release()
 cv2.destroyAllWindows()
