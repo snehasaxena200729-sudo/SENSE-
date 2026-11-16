@@ -396,6 +396,14 @@ class TestQuestions(unittest.TestCase):
         self.assertEqual(phrasing.plural("mouse"), "mice")
 
 
+class TestBagSupport(unittest.TestCase):
+    def test_backpack_and_handbag_are_bags(self):
+        with open(os.path.join(ROOT, "sense_master.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"backpack": "bag"', src)
+        self.assertIn('"handbag": "bag"', src)
+
+
 class TestSafety(unittest.TestCase):
     def test_disabled_stand_in(self):
         d = _Disabled()

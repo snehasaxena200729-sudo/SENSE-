@@ -220,7 +220,10 @@ ALLOWED_ITEMS = {
     "bottle": "bottle",
     "book": "book",
     "laptop": "laptop",
-    "mouse": "mouse"
+    "mouse": "mouse",
+    # "where is my bag?" - YOLO's two bag classes, one SENSE word (personal/)
+    "backpack": "bag",
+    "handbag": "bag",
 }
 
 # Roadmap O1: obstacles the COCO-trained YOLOv8 model already recognises.
