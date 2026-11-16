@@ -23,6 +23,7 @@ from people import PersonIdentityGate, count_phrase
 from continuity import ObjectContinuity
 from face_id import FaceID, Enrolment, decide as face_decide
 from guidance import FindGuide
+import whereabouts
 
 # =====================================================================
 # 1. INITIALIZATION & SETUP
@@ -154,6 +155,7 @@ approach = ApproachTracker()                             # fast-growing YOLO box
 last_frame_time = None
 track_conf = {}                                          # tid -> smoothed detector confidence
 guide = FindGuide()                                      # "find my bottle" guidance (guidance.py)
+item_whereabouts = whereabouts.create(SESSION_ID)        # "on the table, left of the laptop" (whereabouts/)
 guide_target = None                                      # {"kind": item|person|door|stairs, "name": ...}
 last_guide_seen = (0.0, [])                              # (time, observations) of the last YOLO frame
 
@@ -654,8 +656,10 @@ def answer_voice_query(user_text):
         speak(f"I last recognised {name} {answers.format_time_ago(age)}, {where}. I can't see them now.")
         return
     relation = memory_relation(db_record) if same_session else None
-    sentence, level, score = answers.describe_memory(
+    anchored = item_whereabouts.describe(db_record, name, age, where, same_session, turn_hint)
+    sentence, level, score = anchored or answers.describe_memory(
         name, age, db_record.get("status"), where, same_session, turn_hint, relation)
+    sentence += "" if anchored else item_whereabouts.stale_note(db_record, current_time)
     print(f"🎯 Confidence {score:.2f} ({level})")
     speak(sentence[0].upper() + sentence[1:])
 
@@ -836,6 +840,7 @@ def rename_command(user_text):
         speak(f"It is already called {spoken_name(old)}.")
         return
     memory_db.rename(old, new_name)
+    item_whereabouts.rename(old, new_name)
     if old in known_objects:
         known_objects[new_name] = known_objects.pop(old)
     refresh_people()      # face profiles were renamed in SQLite
@@ -864,6 +869,7 @@ def forget_command(user_text):
         speak("Tell me who or what to forget, for example: forget my bottle.")
         return
     memory_db.forget(target)
+    item_whereabouts.forget(target)
     refresh_people()      # face profiles were deleted in SQLite
     for store in (known_people, legacy_people):
         for k in list(store):
@@ -937,6 +943,7 @@ def find_memory(target, now):
     relation = memory_relation(rec) if same_session and target["kind"] == "item" else None
     if relation and target["name"].split()[-1] in relation:
         relation = None      # "the bicycle, next to the yellow bicycle": the same thing twice
+    relation = (item_whereabouts.relation_for(rec) if target["kind"] == "item" else None) or relation
     if same_session and target["kind"] == "item" and (rec.get("status") or "").upper() == "GONE":
         where += ", but it disappeared from there, so it may have been moved"   # same honesty as "where is"
     return {"world_angle": rec.get("world_angle") if same_session else None,
@@ -1462,6 +1469,7 @@ while True:
                     frame_observations[display_name] = {
                         "zone": zone, "world_angle": obs_angle,
                         "x": center_x, "y": center_y, "dist_feet": dist_feet,
+                        "box": (x1, y1, x2, y2), "category": winner_name,   # for whereabouts/
                     }
 
             # Visual Rendering
@@ -1509,6 +1517,7 @@ while True:
                     world_angle=obs["world_angle"], session_id=SESSION_ID,
                     dist_feet=obs["dist_feet"], seen_at=current_time)
                 last_db_write[name] = current_time
+    item_whereabouts.observe(frame_observations, current_time, frame_width, frame_height, camera_is_stable)
 
     # Persist newly named object identities (rare) and free old track buffers
     for eid, ent in resolver.pop_dirty():
