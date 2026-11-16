@@ -82,6 +82,18 @@ def extract_text(words, config):
     return truncate_words(text, config.max_spoken_words)
 
 
+def is_unclear(words, config):
+    """True when Tesseract itself was unsure: a word we would speak scored below
+    sure_word_conf, or a real-looking word was dropped for low confidence (so the
+    spoken text has a gap). SENSE then says the reading may be wrong, because a
+    misread medicine dose must never sound certain."""
+    kept = confident_words(words, config.min_word_conf)
+    if any(w.conf < config.sure_word_conf for w in kept):
+        return True
+    return any(config.unclear_floor_conf <= w.conf < config.min_word_conf and is_strong(w.text)
+               for w in words)
+
+
 class RepeatFilter:
     """Remembers what was spoken recently, to skip near-identical repeats."""
 

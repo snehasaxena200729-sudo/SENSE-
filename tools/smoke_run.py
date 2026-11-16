@@ -168,6 +168,8 @@ class _ScriptedQueue(queue.Queue):
     def get_nowait(self):
         if questions and state["n"] >= questions[0][0]:
             q = questions.pop(0)[1]
+            if q == "<whisper echo>":     # what Whisper says on silence: its own hint prompt
+                q = sys._getframe(1).f_globals.get("whisper_prompt", q)
             spoken.append((state["n"], f"[asked: {q}]"))
             return ("text", q)
         return super().get_nowait()

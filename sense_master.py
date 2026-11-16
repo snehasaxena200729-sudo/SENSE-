@@ -124,8 +124,10 @@ def refresh_people():
     # Hints only help Whisper SPELL names it has been taught (not "Neha" or "snail").
     # They cannot create an identity: naming needs a verified face.
     hint_names = list(known_people) + [n.title() for n in LEGACY_PEOPLE if n.title() not in known_people]
+    # No command words here: on silence Whisper can echo this prompt back, and an
+    # echoed "forget" / "rename" was obeyed as a real command (it deleted memory).
     whisper_prompt = ", ".join(hint_names + ["water bottle", "medicine bottle", "phone",
-                                            "laptop", "rename", "forget"]) + "."
+                                            "laptop"]) + "."
 
 
 whisper_prompt = ""
@@ -935,6 +937,8 @@ def find_memory(target, now):
     relation = memory_relation(rec) if same_session and target["kind"] == "item" else None
     if relation and target["name"].split()[-1] in relation:
         relation = None      # "the bicycle, next to the yellow bicycle": the same thing twice
+    if same_session and target["kind"] == "item" and (rec.get("status") or "").upper() == "GONE":
+        where += ", but it disappeared from there, so it may have been moved"   # same honesty as "where is"
     return {"world_angle": rec.get("world_angle") if same_session else None,
             "age_text": answers.format_time_ago(now - rec["last_seen"]),
             "where": where if same_session else f"{where} at that time",
@@ -1238,8 +1242,9 @@ while True:
     continuity_dets = []
 
     candidates = []
-    active_people_crops.clear()
-    active_object_crops.clear()
+    if should_run_yolo:     # skipped frame: keep the last crops ("this is Sneha" while the image moves)
+        active_people_crops.clear()
+        active_object_crops.clear()
     frame_observations = {}   # name -> this frame's stable observation (Roadmap E2)
     enrol_candidates = []     # (eye px, track id, face embedding) while enrolling
     guide_seen = []           # confirmed sightings this frame, for "find my ..." guidance

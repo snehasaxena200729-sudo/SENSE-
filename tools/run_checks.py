@@ -130,6 +130,62 @@ def check_people(name, legacy):
     return check
 
 
+DESTRUCTIVE_RE = r"forgotten|is now called|memorized|please look at the camera"
+
+
+def check_echo(run, name):
+    """Whisper repeating its own hint prompt must not change memory (regression)."""
+    sp = run["spoken"]
+    k = next((i for i, (_, t) in enumerate(sp) if t.startswith("[asked:") and "water bottle" in t), None)
+    if k is None:
+        return ["the Whisper echo question was not delivered"]
+    reply = sp[k + 1][1] if k + 1 < len(sp) else ""
+    errs = [f"echo was obeyed as a command: {reply!r}"] if re.search(DESTRUCTIVE_RE, reply, re.I) else []
+    who = answer_to(run, "who was here today") or ""
+    if name.lower() not in who.lower():
+        errs.append(f"{name} missing after the echo: {who!r}")
+    return errs
+
+
+def check_sway_naming(name):
+    def check(run):
+        errs = no_errors(run)
+        first = answer_to(run, f"this is {name.lower()}") or ""
+        if "look at the camera" not in first:
+            errs.append(f"naming failed while the image moves: {first!r}")
+        if not said(run, rf"recognise {name} by face"):
+            errs.append(f"enrolment of {name} not confirmed")
+        return errs
+    return check
+
+
+def check_events(a, b):
+    """events.mp4: a disappears in view, camera turns away and back, a is back elsewhere."""
+    def check(run):
+        errs = no_errors(run)
+        where_gone = answer_to(run, f"where is the {a}") or ""
+        if "disappeared" not in where_gone or "probably still there" in where_gone or where_gone.startswith("I see"):
+            errs.append(f"gone {a} not reported honestly: {where_gone!r}")
+        find = answer_to(run, f"find the {a}") or ""
+        if "disappeared" not in find:
+            errs.append(f"find mode hides that the {a} disappeared: {find!r}")
+        sp = run["spoken"]
+        changes = [sp[i + 1][1] for i, (_, t) in enumerate(sp[:-1]) if t == "[asked: what changed]"]
+        if len(changes) != 2:
+            return errs + [f"expected 2 'what changed' answers, got {changes}"]
+        if "disappeared" not in changes[0] or a not in changes[0]:
+            errs.append(f"first 'what changed' should say the {a} disappeared: {changes[0]!r}")
+        if "moved" not in changes[1] or a not in changes[1]:
+            errs.append(f"second 'what changed' should say the {a} was moved: {changes[1]!r}")
+        if any(b in c for c in changes):
+            errs.append(f"turning the camera away made the {b} count as a change: {changes}")
+        before = answer_to(run, f"where was the {a} before") or ""
+        if "on your left" not in before or "on your right" not in before:
+            errs.append(f"previous place of the {a} wrong: {before!r}")
+        return errs
+    return check
+
+
 def run_clip(path, frames, questions, tag):
     out = os.path.join(tempfile.gettempdir(), f"sense_check_{tag}.json")
     cmd = [sys.executable, os.path.join(ROOT, "tools", "smoke_run.py"), path, str(frames),
@@ -146,6 +202,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--videos", help="folder made by tools/make_test_videos.py")
     ap.add_argument("--name", default="Alex", help="name to teach for person A in people.mp4")
+    ap.add_argument("--event-names", nargs=2, default=["dog", "bicycle"], metavar=("A", "B"),
+                    help="class names of the two objects in events.mp4 (default: dog bicycle)")
     ap.add_argument("--legacy", default=None,
                     help="a name taught with the OLD clothing method in your sense_memory.db, e.g. Sneha")
     args = ap.parse_args()
@@ -168,6 +226,7 @@ def main():
 
     if args.videos:
         n = args.name
+        ea, eb = args.event_names
         scenarios = [
             ("walk towards objects", "approach_far.mp4", 150, [], check_approach),
             ("stand still near objects", "still_near.mp4", 120, [], check_quiet),
@@ -179,6 +238,14 @@ def main():
               f"where is {n.lower()}@205", "who was here today@265"]
              + ([f"where is {args.legacy.lower()}@300"] if args.legacy else []),
              check_people(n, args.legacy)),
+            ("Whisper echoes its hint prompt (must not forget anything)", "people.mp4", 280,
+             [f"this is {n.lower()}@10", "<whisper echo>@200", "who was here today@240"],
+             lambda run: no_errors(run) + check_echo(run, n)),
+            ("introduce someone while the image moves", "sway_person.mp4", 240,
+             [f"this is {n.lower()}@40"], check_sway_naming(n)),
+            ("object disappears, camera turns away and back, object moved", "events.mp4", 770,
+             [f"where is the {ea}@305", f"find the {ea}@400", "stop looking@405", "what changed@460",
+              "what changed@740", f"where was the {ea} before@750"], check_events(ea, eb)),
         ]
         for title, clip, frames, qs, check in scenarios:
             path = os.path.join(args.videos, clip)

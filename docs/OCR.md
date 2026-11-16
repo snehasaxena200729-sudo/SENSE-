@@ -27,6 +27,11 @@ No pip package is needed. At start-up SENSE prints one of these lines:
 
 Tips: hold the text about 30 cm from the camera, flat, in good light, and keep it still for a second.
 
+**Unclear readings are flagged.** When Tesseract was unsure of a word it would speak (confidence below 85),
+or dropped a real-looking word, SENSE adds: "Some words were unclear, so please check it, especially any
+numbers." In testing, misread doses ("more than 6" for "8") scored 60 to 80 and would otherwise have been
+spoken as fact. A clean reading is not a guarantee either: always check medicine names and doses.
+
 ## How it works
 
 ```
