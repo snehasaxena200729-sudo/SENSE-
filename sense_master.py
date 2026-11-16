@@ -24,6 +24,7 @@ from continuity import ObjectContinuity
 from face_id import FaceID, Enrolment, decide as face_decide
 from guidance import FindGuide
 import whereabouts
+import personal
 from heading_fusion import TurnEstimator
 import door_distance
 
@@ -219,7 +220,10 @@ ALLOWED_ITEMS = {
     "bottle": "bottle",
     "book": "book",
     "laptop": "laptop",
-    "mouse": "mouse"
+    "mouse": "mouse",
+    # "where is my bag?" - YOLO's two bag classes, one SENSE word (personal/)
+    "backpack": "bag",
+    "handbag": "bag",
 }
 
 # Roadmap O1: obstacles the COCO-trained YOLOv8 model already recognises.
@@ -231,6 +235,8 @@ HAZARD_ITEMS = {
 }
 ALLOWED_ITEMS.update(HAZARD_ITEMS)
 HAZARD_NAMES = set(HAZARD_ITEMS.values())
+# "my cup" = ONE physical cup, never every cup (personal/)
+personal_items = personal.create(SESSION_ID, known_objects, set(ALLOWED_ITEMS.values()))
 
 # Foundation fix 2 + 3: persistent identities and distance-trend proximity
 # alerts for the things you can walk into (continuity.py). One instance per
@@ -398,6 +404,19 @@ def match_custom_object(crop, base_category, threshold=0.55):
                 best_match = name
     return best_match
 
+def custom_item_for_track(tid, crop, category, center_x, now):
+    """Which personal item (if any) this track is. personal/ decides from the
+    look, the position and the other objects around it; the old colour-only
+    match is used only if that package could not start."""
+    if not personal_items.enabled:
+        return match_custom_object(crop, category) if crop.size > 0 else None
+    if not personal_items.has_category(category):
+        return None
+    sig = get_unified_chroma_signature(crop) if crop.size > 0 else None
+    angle = spatial.world_angle(center_x, globals().get("frame_width", 1280), cumulative_camera_heading)
+    return personal_items.label(tid, category, sig, angle, now, camera_is_stable)
+
+
 STOPWORDS = {"now", "here", "there", "it", "this", "that", "me", "you", "them", "someone", "something", "anything", "please"}
 
 def learn_person(name):
@@ -469,7 +488,19 @@ def learn_custom_object(custom_name):
             break
 
     # Pick the target crop that matches what you said, or the largest one
-    if expected_cat:
+    if expected_cat and personal_items.enabled:
+        # personal/: the name goes to ONE cup. No cup in view, or two cups of
+        # about the same size -> ask, never bind the name to a guess.
+        target_tid, clear = personal_items.pick_teach_target(
+            [(tid, d["area"]) for tid, d in active_object_crops.items() if d["category"] == expected_cat])
+        if target_tid is None:
+            speak(f"I can't see a {expected_cat} right now. Point the camera at it and say it again.")
+            return
+        if not clear:
+            speak(f"I can see more than one {expected_cat}. Hold yours closer to the camera, "
+                  f"or move the others away, and say it again.")
+            return
+    elif expected_cat:
         matching_tids = [tid for tid, d in active_object_crops.items() if d["category"] == expected_cat]
         target_tid = max(matching_tids, key=lambda k: active_object_crops[k]["area"]) if matching_tids else max(active_object_crops.keys(), key=lambda k: active_object_crops[k]["area"])
     else:
@@ -489,8 +520,24 @@ def learn_custom_object(custom_name):
         if old_name:
             event_tracker.items.pop(old_name.title(), None)
             live_memory.pop(old_name.title(), None)
+            if personal_items.enabled and old_name.lower() not in known_objects:
+                # personal/: "blue cup" WAS this cup. Left in memory, it became a
+                # ghost landmark ("your cup, next to the blue cup") - remove it.
+                memory_db.forget(old_name)
+                item_whereabouts.forget(old_name)
+                resolver.forget_track(target_tid)
+                resolver.entities.pop(old_eid, None)
         track_locked_identities[target_tid] = clean_name.title()
         memory_db.save_custom_object_profile(clean_name, base_cat, sig)
+        # personal/: bind the name to THIS instance; the other objects of the
+        # same kind in view are different objects, remembered as look-alikes
+        fw = globals().get("frame_width", 1280)
+        others = [(get_unified_chroma_signature(d["crop"]),
+                   spatial.world_angle(d.get("center_x", fw / 2), fw, cumulative_camera_heading), t)
+                  for t, d in active_object_crops.items() if t != target_tid and d["category"] == base_cat]
+        personal_items.teach(clean_name, base_cat, sig, target_tid,
+                             spatial.world_angle(target_data.get("center_x", fw / 2), fw, cumulative_camera_heading),
+                             time.time(), [o for o in others if o[0] is not None])
         item_words = clean_name[3:] if clean_name.startswith("my ") else clean_name
         speak(f"Got it. I have permanently memorized your {item_words}.")
         print(f"📦 Successfully memorized item: '{clean_name}' as a {base_cat}!")
@@ -671,8 +718,16 @@ def answer_voice_query(user_text):
               f"Please introduce {who.capitalize()} to me again by face.")
         return
 
-    # Intents WHERE / WHEN / PREVIOUS need a target item or person
-    found_target = find_target(user_text)
+    # Intents WHERE / WHEN / PREVIOUS need a target item or person.
+    # personal/: "my cup" is ONE cup - resolve it before the generic name match,
+    # which would otherwise answer about whichever cup was seen last.
+    personal_q = personal_items.query(user_text, current_time)
+    if personal_q and personal_q[0] == "say":      # "which bottle?" / "which cup is yours?"
+        speak(personal_q[1])
+        return
+    found_target = personal_q[1].title() if personal_q else find_target(user_text)
+    personal_note = personal_items.note(found_target, current_time, cumulative_camera_heading) \
+        if personal_q else ""
     if not found_target:
         if qa is not None and qa.free_form(user_text, current_time):   # local AI model, offline
             return
@@ -701,12 +756,12 @@ def answer_voice_query(user_text):
     if db_record is not None and person_since and db_record["last_seen"] < person_since:
         db_record = None      # that sighting came from clothing colour, not a face
     if db_record is None:
-        speak(f"I have no record of {found_target} in my memory database.")
+        speak(f"I have no record of {found_target} in my memory database." + personal_note)
         return
     name = spoken_name(db_record["name"])
     age = current_time - db_record["last_seen"]
     if intent == "WHEN":
-        speak(f"I last saw {name} {answers.format_time_ago(age)}, {db_record['last_zone']}.")
+        speak(f"I last saw {name} {answers.format_time_ago(age)}, {db_record['last_zone']}." + personal_note)
         return
     where, turn_hint, same_session = location_words(db_record)
     if person_since:
@@ -722,7 +777,7 @@ def answer_voice_query(user_text):
     sentence += "" if anchored else item_whereabouts.stale_note(db_record, current_time)
     sentence = (turn_estimator.since_sentence(db_record["name"], name) if same_session else "") + sentence
     print(f"🎯 Confidence {score:.2f} ({level})")
-    speak(sentence[0].upper() + sentence[1:])
+    speak(sentence[0].upper() + sentence[1:] + personal_note)
 
 
 # ---------------------------------------------------------------------
@@ -902,6 +957,7 @@ def rename_command(user_text):
         return
     memory_db.rename(old, new_name)
     item_whereabouts.rename(old, new_name)
+    personal_items.rename(old, new_name)
     if old in known_objects:
         known_objects[new_name] = known_objects.pop(old)
     refresh_people()      # face profiles were renamed in SQLite
@@ -931,6 +987,7 @@ def forget_command(user_text):
         return
     memory_db.forget(target)
     item_whereabouts.forget(target)
+    personal_items.forget(target)
     refresh_people()      # face profiles were deleted in SQLite
     for store in (known_people, legacy_people):
         for k in list(store):
@@ -967,7 +1024,11 @@ def start_find(user_text, now):
         if who:
             speak(f"I can't recognise {who.capitalize()} reliably yet. Please introduce them to me again by face.")
             return
-        found = find_target(user_text)
+        personal_q = personal_items.query(user_text, now)     # "find my cup": that one cup
+        if personal_q and personal_q[0] == "say":
+            speak(personal_q[1])
+            return
+        found = personal_q[1].title() if personal_q else find_target(user_text)
         if not found:
             speak("I can't look for that. I can find a bottle, cup, phone, remote, book, laptop, mouse, "
                   "chair, bed, table, door, stairs, people I know by face, and items you taught me.")
@@ -1482,12 +1543,13 @@ while True:
                     active_object_crops[tid] = {
                         "crop": crop,
                         "area": w_px * h_px,
-                        "category": winner_name
+                        "category": winner_name,
+                        "center_x": center_x,     # where it is, for "this is my cup" (personal/)
                     }
 
                 # Check if this tracklet is locked to a custom item OF THIS SAME CATEGORY!
                 is_custom_item = False
-                if tid in track_locked_identities:
+                if tid in track_locked_identities and not personal_items.enabled:
                     locked_name = track_locked_identities[tid].lower()
                     if locked_name in known_objects and known_objects[locked_name]["category"] == winner_name:
                         display_name = track_locked_identities[tid]
@@ -1496,7 +1558,7 @@ while True:
                         del track_locked_identities[tid]
 
                 if not is_custom_item:
-                    custom_match = match_custom_object(crop, winner_name) if crop.size > 0 else None
+                    custom_match = custom_item_for_track(tid, crop, winner_name, center_x, current_time)
                     if custom_match:
                         display_name = custom_match.title()
                         track_locked_identities[tid] = display_name
@@ -1605,6 +1667,7 @@ while True:
                     dist_feet=obs["dist_feet"], seen_at=current_time)
                 last_db_write[name] = current_time
     item_whereabouts.observe(frame_observations, current_time, frame_width, frame_height, camera_is_stable)
+    personal_items.end_frame(current_time, camera_is_stable)
     turn_estimator.note_seen(frame_observations)
 
     # Persist newly named object identities (rare) and free old track buffers
@@ -1706,6 +1769,7 @@ while True:
 for eid, ent in resolver.entities.items():
     if ent.get("name"):
         memory_db.save_entity(eid, ent["name"], ent["category"], ent["color"], ent["sig"], ent["last_seen"])
+personal_items.flush()
 memory_db.close()
 if ocr is not None:
     ocr.close()

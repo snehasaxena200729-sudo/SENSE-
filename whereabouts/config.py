@@ -10,7 +10,7 @@ class WhereaboutsConfig:
     # ALLOWED_ITEMS values); items you taught ("my bottle") carry their base
     # category, so they are included automatically.
     item_categories: frozenset = frozenset(
-        {"phone", "remote", "cup", "bottle", "book", "laptop", "mouse"})
+        {"phone", "remote", "cup", "bottle", "book", "laptop", "mouse", "bag"})
 
     # Surfaces and the part of their box (from the top) where a resting item's
     # bottom edge can be. From a standing or sitting camera the top of a table
