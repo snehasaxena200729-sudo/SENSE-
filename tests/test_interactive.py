@@ -259,6 +259,7 @@ class TestLocalModel(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()
 
     def run_until(self, qa, h, cond, limit=6.0):
         t0 = time.time()
