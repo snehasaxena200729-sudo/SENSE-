@@ -73,6 +73,25 @@ def check_door(run):
     return errs
 
 
+def check_door_distance(run):
+    """Door distance: one first sighting with a number or an honest 'cannot estimate',
+    updates only getting closer while walking in, and a 'where is the door' answer."""
+    errs = no_errors(run)
+    first = said(run, r"^Door detected")
+    if len(first) != 1:
+        errs.append(f"expected one 'Door detected ...', got {first}")
+    elif not re.search(r"approximately \d+ feet|cannot estimate its distance reliably|far ahead", first[0]):
+        errs.append(f"first sighting without a distance or an honest 'cannot estimate': {first}")
+    nums = [int(m.group(1)) for t in said(run, r"^(Door detected|The door is)")
+            for m in [re.search(r"approximately (\d+) feet", t)] if m]
+    if nums != sorted(nums, reverse=True):
+        errs.append(f"distances while walking towards the door must not grow: {nums}")
+    ans = answer_to(run, "where is the door")
+    if not ans or not re.search(r"door", ans, re.I) or re.search(r"haven't seen", ans):
+        errs.append(f"bad answer to 'where is the door': {ans!r}")
+    return errs
+
+
 GUIDE_RE = r"^(Found |Straight ahead|A little to your|On your (left|right)|Keep turning|I lost sight|.* should be within reach|.* is right in front of you)"
 
 
@@ -240,6 +259,8 @@ def main():
             ("stand still near objects", "still_near.mp4", 120, [], check_quiet),
             ("turn the head past objects", "pan_near.mp4", 120, [], check_quiet),
             ("walk towards a door", "approach_door.mp4", 150, [], check_door),
+            ("door distance: announce, update, answer", "approach_door.mp4", 150,
+             ["where is the door@100"], check_door_distance),
             ("find an item: memory, turn, walk up", "find_item.mp4", 315, ["find the bicycle@150"], check_find),
             ("introduce, leave, come back, strangers", "people.mp4", 308,
              [f"this is {n.lower()}@10", "what do you see@140", "what do you see@200",

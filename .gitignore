@@ -27,3 +27,6 @@ yolov8s-oiv7.pt
 # Face recognition models, downloaded automatically on first run (face_id.py)
 models/
 ocr_testset/
+
+# Door distance tape-measure results (tools/door_distance_test.py)
+door_distance_results.csv

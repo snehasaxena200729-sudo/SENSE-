@@ -25,6 +25,7 @@ from face_id import FaceID, Enrolment, decide as face_decide
 from guidance import FindGuide
 import whereabouts
 from heading_fusion import TurnEstimator
+import door_distance
 
 # =====================================================================
 # 1. INITIALIZATION & SETUP
@@ -179,6 +180,10 @@ except ValueError:
 FOCAL_UNC = distance.CALIBRATED_FOCAL_UNCERTAINTY if FOCAL_RATIO else distance.FOCAL_UNCERTAINTY
 print("📏 Distance: " + ("calibrated focal length." if FOCAL_RATIO else
       "NOT calibrated (assumed 65 degree view). Run tools/validate_distance.py to calibrate."))
+# Door distance: "Door approximately 5 feet ahead", smoothed per tracked door (door_distance.py)
+door_ranger = door_distance.DoorRanger(door_distance.load_calibration(memory_db.get_setting))
+print("🚪📏 Door distance: " + ("calibrated." if door_ranger.cal else
+      "standard door size assumed. Run tools/door_distance_test.py --calibrate to calibrate."))
 try:
     speech_rate = int(memory_db.get_setting("speech_rate", "190"))   # O2 preference
 except ValueError:
@@ -590,7 +595,9 @@ def answer_voice_query(user_text):
             said += " " + obj.cls
         if scene_hazards is not None:   # doors / stairs from the second model
             for hz_name, hz_angle in scene_hazards.visible(current_time).items():
-                active_items.append(f"a {hz_name} {spatial.direction_phrase(hz_angle)}")
+                doors = door_ranger.overview_items(current_time, globals().get("frame_width", 1280),
+                                                   globals().get("f_px")) if hz_name == "door" else []
+                active_items.extend(doors or [f"a {hz_name} {spatial.direction_phrase(hz_angle)}"])
 
         if not active_items:
             speak("I do not see any familiar objects or people right now.")
@@ -609,6 +616,9 @@ def answer_voice_query(user_text):
                     # only the handle is visible: say exactly that (audit fix 3)
                     speak(f"I can't see the whole door, but there is a door handle "
                           f"{spatial.direction_phrase(handle['angle'])}.")
+                elif hz_name == "door" and door_ranger.where_answer(current_time) is not None:
+                    speak(door_ranger.where_answer(current_time, cumulative_camera_heading,
+                                                   globals().get("frame_width", 1280), globals().get("f_px")))
                 elif d and current_time - d["time"] <= scene_hazards.VISIBLE_S:
                     speak(f"There is a {hz_name} {spatial.direction_phrase(d['angle'])}.")
                 elif d:
@@ -1026,6 +1036,9 @@ def update_scene_objects(dets, now, frame_w, frame_h, f_px):
     shift_since_scene[:] = [0.0, 0.0]
     for obj, _ in created:
         angle = spatial.pixel_to_angle((obj.box[0] + obj.box[2]) / 2, frame_w)
+        if obj.cls == "door":      # announced with its distance by door_distance.py, below
+            door_ranger.on_created(obj, now, angle)
+            continue
         prev = last_scene_announce.get(obj.cls)
         last_scene_announce[obj.cls] = (now, angle)
         if prev and now - prev[0] < 10.0 and abs(angle - prev[1]) < 25.0:
@@ -1038,7 +1051,14 @@ def update_scene_objects(dets, now, frame_w, frame_h, f_px):
                       + (", very close" if very_close else ""))
     for obj, words in scene_objects.proximity_alerts(now, frame_w):
         where = spatial.direction_phrase(spatial.pixel_to_angle((obj.box[0] + obj.box[2]) / 2, frame_w))
-        notifier.push(P1, f"near:scene:{obj.oid}", f"Careful, {object_label(obj)} {where}, {words}")
+        if notifier.push(P1, f"near:scene:{obj.oid}", f"Careful, {object_label(obj)} {where}, {words}") \
+                and obj.cls == "door":
+            door_ranger.note_alert(obj.oid, now)
+    # after the warnings, so a distance update never follows a "Careful, door" at once
+    for key, text in door_ranger.update(scene_objects.objects, now, frame_w, frame_h, f_px,
+                                        cumulative_camera_heading, focal_unc=FOCAL_UNC,
+                                        allow_updates=not guide.active and notifier.level != "quiet"):
+        notifier.push(P1, key, text)
 
 
 def handle_event(ev):
@@ -1633,6 +1653,8 @@ while True:
             cv2.rectangle(frame, (hx1, hy1), (hx2, hy2), (200, 0, 200), 2)
             cv2.putText(frame, hz_name.title(), (hx1, max(15, hy1 - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 0, 200), 2)
+        for (bx1, by1, _, _), label in door_ranger.hud_labels(current_time):   # estimated, not measured
+            cv2.putText(frame, label, (int(bx1), int(by1) + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 0, 200), 2)
     if ocr is not None:   # text boxes, only for a few seconds after "read this" / R
         ocr.draw(frame, current_time)
     cv2.imshow("SENSE Master Assistive System", frame)

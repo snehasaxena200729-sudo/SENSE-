@@ -29,6 +29,7 @@ models (YuNet 0.2 MB + SFace 37 MB, checksum-verified, into `models/`) (and `lap
 | "What do you see?" | Lists what is visible right now, with distance |
 | "Where is my phone?" | Answers live if it's visible. Otherwise gives the last place it was seen, the direction from where you face *now* ("turn about 90 degrees to your right"), a nearby object ("next to the laptop"), and how sure it is |
 | "Find my bottle" / "Help me find my phone" / "Take me to the door" | **Guides you to it** with short cues as you turn and walk: "a little to your left", "straight ahead, a few steps away", then "your bottle should be within reach". If it is not in view, it uses memory ("I last saw it 2 minutes ago, on your left, next to the laptop. Turn about 90 degrees to your left") and updates the turn as you turn. Hazard warnings always come first. See `docs/FIND_MODE.md` |
+| "Where is the door?" | "The door is approximately 5 feet ahead on your right." If it is out of view: "I can't see the door right now. When I last saw it, 20 seconds ago, it was approximately 5 feet away. From where you face now, it is to your left." Never a number it can't back up: "There is a door ahead, but I cannot estimate its distance reliably." |
 | "Stop looking" / "Cancel" / "I found it" | Ends the guidance |
 | "What changed?" | Summarises what moved, disappeared or appeared since you last asked (max 30 minutes back) |
 | "Where was my bottle before?" | Uses the event history to say where it was before it moved |
@@ -70,6 +71,7 @@ SENSE also speaks **on its own**:
 | `answers.py` | **Intents, fuzzy name matching, confidence scoring** (confirmed / likely / uncertain) and wording |
 | `hazards.py` | **Sudden-obstacle warnings:** time-to-contact from optical-flow divergence (any textured object) and box-growth checks for every YOLO class |
 | `continuity.py` | **Object continuity + proximity.** Keeps one identity per object while you walk (camera-motion-compensated matching, ByteTrack id as a hint, no stale boxes), measures approach from the size trend along an axis that is not cut off, one alert per approach |
+| `door_distance.py` | **Door distance narration.** Per tracked door: one measurement per sighting (door height if whole door is visible, else width; none if cut off at a side or not door-shaped), a Kalman filter on log(distance) with a walking-speed plausibility gate, and speech only on real change: "Door detected approximately 8 feet ahead" ... "The door is approximately 5 feet away". Calibrate with `tools/door_distance_test.py --calibrate` |
 | `distance.py` | **Monocular distance with error ranges.** Focal length from resolution (or calibration), cut-off box detection, coarse spoken bands |
 | `face_id.py` | **Face identity.** OpenCV YuNet finds the face, SFace turns it into 128 numbers; a name needs cosine similarity >= 0.363, a margin over everyone else, and a good frontal face. Enrolment collects 5 samples without blocking |
 | `people.py` | **Person naming gate.** Detection (YOLO) and tracking (ByteTrack) never say who someone is; a name is spoken only after a verified identity check agrees 3 of the last 5 times |
