@@ -3,7 +3,7 @@ tools/smoke_run.py - run the REAL sense_master.py loop on a video file, headless
 and record everything SENSE would say. No camera, mic, window or `say` needed.
 
     python tools/smoke_run.py clip.mp4 [max_frames] ["question@frame" ...]
-        [--json out.json] [--stats-every N] [--loop]
+        [--json out.json] [--stats-every N] [--loop] [--db memory.db]
 
     e.g. python tools/smoke_run.py desk.mp4 200 "what do you see@60" "where is sneha@120"
 
@@ -14,6 +14,8 @@ The SQLite memory is a temporary copy, so your real sense_memory.db is untouched
 loop time, and (every N frames) process memory and the size of SENSE's
 internal tables - used by tools/run_checks.py and the stress test.
 --loop restarts the video when it ends (long stress runs from a short clip).
+--db uses (and keeps) this memory database instead of a throw-away copy, so a
+second run can test what SENSE remembers after a restart.
 --fast reads frames as fast as possible. By default frames are paced to the
 clip's frame rate, like a camera: SENSE's timing logic (gaps, trends, cooldowns)
 works in seconds, and an unpaced run squeezes a 2 s gap into a fraction of that.
@@ -33,7 +35,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 args = sys.argv[1:]
-opts = {"--json": None, "--stats-every": "0"}
+opts = {"--json": None, "--stats-every": "0", "--db": None}
 flags = {"--loop": False, "--fast": False}
 rest = []
 i = 0
@@ -182,6 +184,10 @@ src_db = os.path.join(ROOT, "sense_memory.db")
 if os.path.exists(src_db):
     shutil.copy(src_db, os.path.join(tmp, "sense_memory.db"))
 memory_db.DB_PATH = os.path.join(tmp, "sense_memory.db")
+if opts["--db"]:     # keep the memory between runs ("restart" tests); created from a copy if missing
+    if not os.path.exists(opts["--db"]) and os.path.exists(src_db):
+        shutil.copy(src_db, opts["--db"])
+    memory_db.DB_PATH = os.path.abspath(opts["--db"])
 
 os.chdir(ROOT)
 sys.argv = ["sense_master.py", "--source", video]

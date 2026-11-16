@@ -224,6 +224,14 @@ def main():
     summary = next((l for l in reversed(tail) if l.startswith("Ran ")), "?")
     results.append(("OCR tests", r.returncode == 0, [] if r.returncode == 0 else tail[-15:], summary + " " + tail[-1]))
 
+    print("== Whereabouts tests (whereabouts/tests/)")   # "where did I leave it?" module
+    r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "whereabouts/tests", "-t", "."],
+                       cwd=ROOT, capture_output=True, text=True)
+    tail = (r.stderr or r.stdout).strip().splitlines()
+    summary = next((l for l in reversed(tail) if l.startswith("Ran ")), "?")
+    results.append(("whereabouts tests", r.returncode == 0, [] if r.returncode == 0 else tail[-15:],
+                    summary + " " + tail[-1]))
+
     if args.videos:
         n = args.name
         ea, eb = args.event_names
