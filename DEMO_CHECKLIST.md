@@ -19,6 +19,7 @@ git checkout main && git pull   # or the branch you are demoing
 git log -1 --oneline            # write down this commit id
 python3 -c "import ultralytics, cv2, speech_recognition, whisper, lap; print('python packages OK')"
 tesseract --version | head -1   # 5.x  (if missing: brew install tesseract)
+ollama list | grep llama3.2     # optional local AI model (setup: docs/INTERACTIVE_QA.md)
 python3 tools/run_checks.py     # about 15 s; must end with "0 failed."
 ```
 
@@ -137,7 +138,16 @@ SENSE only updates its memory while the camera is still ("CAM MOVING" in red = i
 - [ ] **"Speak slower"** → "Okay, I will speak slower." then **"Speak faster"** → "Okay, I will speak faster."
 - [ ] Finish with **"Normal mode"**. (These settings are saved for the next run.)
 
-### H. Offline proof
+### H. Ask SENSE questions (2 min, laptop still, a bottle and a chair in view)
+- [ ] **"What colour is the bottle?"** → "The bottle looks blue." (or says it can only see part of it / it is too dark)
+- [ ] **"Where is it?"** → the usual where-answer for the bottle
+- [ ] **"How many chairs are in front of me?"** → "I can see two chairs: ..."
+- [ ] **"Is there anything on my right?"** → what is on the right, or "I don't see anything I recognise on your right."
+- [ ] **"What time is it?"** and **"What is today's date?"**
+- [ ] Turn the laptop away, then **"What was previously in front of me?"** → "Earlier, in front of you ... I saw ..."
+- [ ] Optional, only if the terminal said `💬 Local AI model ready`: **"Can I sit somewhere?"** → "One moment." then a short answer about what SENSE sees
+
+### I. Offline proof
 - [ ] Wi-Fi has been off since step 3 and every step above worked.
 - [ ] Press **q** to quit.
 
@@ -157,3 +167,6 @@ SENSE only updates its memory while the camera is still ("CAM MOVING" in red = i
 | Voice works but no sound | Check the volume; run `say test` in another terminal |
 | SENSE crashes or freezes | Press q (or Ctrl+C in the terminal), run `python3 sense_master.py` again. Memory is kept in `sense_memory.db` |
 | Camera not found at start | Quit other camera apps, run again |
+| A question gets "I heard you, but I did not catch which item" | Ask in the words of section H; the local AI model is off (see the 💬 lines at start-up) |
+| "Local AI model off" at start-up | Open the Ollama app before SENSE; or ignore it, every section-H question works without it |
+| Video stutters while the AI model answers | Expected for 1 to 3 s; or run `SENSE_LLM=off python3 sense_master.py` |
