@@ -15,6 +15,17 @@ Three kinds of cases, mixed at random:
   SESSION   a random conversation (teach rooms, ask where am I, take me to,
             list) run through HomeMap on an in-memory database and compared
             with a simple reference model of what the answer must say.
+            (Teaching needs camera frames, so these conversations cancel it.)
+  TEACH     (Phase 1) a random head-turn while teaching: any speed, either
+            direction, pauses, back-and-forth, blurred frames, "stop" early.
+            Never more than one view per 20-degree direction, never more
+            than 18, always ends by the time limit, "done" only with enough views.
+  RECOGNISE (Phase 1) a random home of 2-8 taught rooms (synthetic image
+            fingerprints with realistic noise) and a random walk through the
+            rooms and untaught places, with odd frames (10% junk such as
+            blur, 3% a clear glimpse of another place). From the 3rd check
+            after a doorway, "You are in X" must never name the wrong room;
+            "I think" may, and is counted.
 """
 
 import argparse
@@ -26,7 +37,12 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+import numpy as np                   # noqa: E402
+
 import mapping                       # noqa: E402
+from mapping.config import MappingConfig       # noqa: E402
+from mapping.recognise import UNKNOWN, Recogniser, RoomModel  # noqa: E402
+from mapping.teaching import TeachSession      # noqa: E402
 from mapping import phrases as P     # noqa: E402
 from mapping.config import ROOM_WORDS  # noqa: E402
 
@@ -123,6 +139,10 @@ def session_case(rng):
             current, declared_at = room, clock()
             if room not in reply:
                 return False, f"SESSION teach {room}: {reply!r}"
+            if "turn slowly" in reply:            # no camera here: cancel the teaching
+                reply = home.handle(rng.choice(["cancel", "never mind", "Cancel."]), clock())
+                if "Nothing new was saved" not in reply:
+                    return False, f"SESSION cancel: {reply!r}"
         elif action == "where":
             reply = home.handle(noisy(rng, rng.choice(WHERE_T)), clock())
             fresh = current is not None and clock() - declared_at <= 30 * 60
@@ -152,23 +172,123 @@ def session_case(rng):
     return True, ""
 
 
+CFG = MappingConfig()
+
+
+def teach_case(rng):
+    start = rng.uniform(-180, 180)
+    s = TeachSession(1, "kitchen", start, 0.0, CFG)
+    fps = rng.choice([8, 10, 15, 30])
+    h, t, speed = start, 0.0, rng.uniform(-60, 60)
+    blur_p = rng.choice([0.0, 0.1, 0.5, 0.95])
+    stop_at = rng.uniform(1, 40) if rng.random() < 0.2 else None
+    end = None
+    while t < CFG.max_teach_s + 5:
+        t += 1.0 / fps
+        if rng.random() < 0.03:
+            speed = rng.choice([0.0, rng.uniform(-60, 60), rng.uniform(5, 40)])
+        h = ((h + speed / fps + rng.gauss(0, 0.5)) + 180) % 360 - 180
+        if stop_at is not None and t >= stop_at:
+            end = s.stop()
+            break
+        ev = s.feed(h, t, 0.0 if rng.random() < blur_p else 40.0,
+                    lambda: {"emb": None, "pts": None, "des": None, "landmarks": []})
+        if ev and ev[0] in ("done", "failed"):
+            end = ev
+            break
+    msg = f"TEACH fps={fps} blur={blur_p} stop={stop_at} -> {end} {s!r}"
+    if end is None:
+        return False, msg + " (never ended)"
+    bins = [v["bin"] for v in s.views]
+    if len(bins) != len(set(bins)) or len(s.views) > s.bins_total:
+        return False, msg + " (duplicate direction)"
+    need = CFG.min_stop_views if stop_at is not None else min(CFG.min_views, CFG.done_bins)
+    if end[0] == "done" and len(s.views) < need:
+        return False, msg + " (done with too few views)"
+    if end[0] == "failed" and stop_at is None and len(s.views) >= CFG.done_bins:
+        return False, msg + " (failed with enough views)"
+    return True, ""
+
+
+def unit(v):
+    v = np.asarray(v, np.float32)
+    return v / (np.linalg.norm(v) + 1e-9)
+
+
+RECOG = {"checks": 0, "sure_right": 0, "think_right": 0, "think_wrong": 0, "unsure": 0}
+
+
+def recognise_case(rng):
+    nrng = np.random.default_rng(rng.randint(0, 2**31))
+    dim, n_rooms = 128, rng.randint(2, 8)
+    protos = [unit(nrng.normal(size=dim)) for _ in range(n_rooms + 3)]    # +3 untaught places
+    shared = unit(nrng.normal(size=dim))       # what all indoor views share (walls, light)
+    noise = rng.uniform(0.6, 1.1)              # how different two views of one room are
+
+    def view(room):
+        return unit(1.2 * shared + protos[room] + noise * unit(nrng.normal(size=dim)))
+    rec = Recogniser(CFG)
+    rec.set_rooms([RoomModel(i, f"r{i}", [{"emb": view(i), "pts": None, "des": None, "landmarks": []}
+                                          for _ in range(rng.randint(8, 18))]) for i in range(n_rooms)])
+    where, settled = rng.randrange(n_rooms + 3), 99
+    for step in range(rng.randint(10, 60)):
+        if rng.random() < 0.08:
+            where, settled = rng.randrange(n_rooms + 3), 0    # walked somewhere else
+        settled += 1
+        if settled <= 2:                                      # in the doorway: a bit of both
+            seen = rng.choice([where, rng.randrange(n_rooms + 3), "junk"])
+        else:
+            u = rng.random()      # odd frames: 10% junk (blur, a hand, the ceiling), 3% a clear
+            seen = "junk" if u < 0.10 else rng.randrange(n_rooms + 3) if u < 0.13 else where   # glimpse elsewhere
+        emb = unit(nrng.normal(size=dim)) if seen == "junk" else view(seen)
+        rec.update(emb, None, None, set(), step)
+        if settled < 5:
+            continue          # judged from the 3rd check after the doorway (~2 s at one check per 0.7 s)
+        state, p = rec.best()
+        RECOG["checks"] += 1
+        named = state is not None and state != UNKNOWN and p >= CFG.likely_prob
+        sure = named and p >= CFG.sure_prob and rec.verified(state)
+        truth = where if where < n_rooms else None
+        if sure and state != truth:
+            return False, (f"RECOGNISE: said 'You are in r{state}' (p={p:.2f}) but the user is in "
+                           f"{'r%d' % truth if truth is not None else 'an untaught place'}; rooms={n_rooms} noise={noise:.2f}")
+        if sure:
+            RECOG["sure_right"] += 1
+        elif named and state == truth:
+            RECOG["think_right"] += 1
+        elif named:
+            RECOG["think_wrong"] += 1
+        else:
+            RECOG["unsure"] += 1
+    return True, ""
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("n", nargs="?", type=int, default=10_000)
     ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args()
     rng = random.Random(a.seed)
-    counts, fails = {"new": 0, "existing": 0, "session": 0}, []
+    counts, fails = {"new": 0, "existing": 0, "session": 0, "teach": 0, "recognise": 0}, []
+    cases = {"new": new_case, "existing": existing_case, "session": session_case,
+             "teach": teach_case, "recognise": recognise_case}
     for _ in range(a.n):
         r = rng.random()
-        kind = "new" if r < 0.45 else "existing" if r < 0.85 else "session"
-        ok, msg = {"new": new_case, "existing": existing_case, "session": session_case}[kind](rng)
+        kind = ("new" if r < 0.30 else "existing" if r < 0.55 else "session" if r < 0.65
+                else "teach" if r < 0.80 else "recognise")
+        ok, msg = cases[kind](rng)
         counts[kind] += 1
         if not ok:
             fails.append(msg)
     assert all(w in ROOM_WORDS for w in ("kitchen", "bedroom", "hall"))
     print(f"{a.n} cases (seed {a.seed}): {counts['new']} new commands, "
-          f"{counts['existing']} existing commands, {counts['session']} conversations")
+          f"{counts['existing']} existing commands, {counts['session']} conversations, "
+          f"{counts['teach']} teaching turns, {counts['recognise']} homes walked through")
+    c = RECOG
+    if c["checks"]:
+        print(f"recognition checks: {c['checks']}: 'You are in' right {c['sure_right']}, "
+              f"'I think' right {c['think_right']}, 'I think' wrong {c['think_wrong']}, "
+              f"not sure {c['unsure']} (a confident wrong answer fails the test)")
     print(f"{len(fails)} failed")
     for m in fails[:25]:
         print("  " + m)

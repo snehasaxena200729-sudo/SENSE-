@@ -11,6 +11,10 @@ sentence exactly as before. When in doubt we return None. Phase 0 owns only:
     GO          "take me to the bedroom", "how do I get to the kitchen"
                 (only if the place is a room word or a registered room)
     LIST        "which rooms do you know", "list the rooms"
+    RELEARN     "relearn this room", "relearn the kitchen", "learn this room again"  (Phase 1)
+
+While a room is being taught, "stop" / "cancel" / "done" end the teaching
+(manager.py checks that first, only while teaching is running).
 
 Clash rules, each checked by the stress test:
   * "this is Sneha" / "this is my bottle" / "this is the kitchen" are NOT
@@ -29,8 +33,8 @@ from typing import Optional
 
 from .config import MappingConfig
 
-TEACH, WHERE_AM_I, GO, LIST = "TEACH", "WHERE_AM_I", "GO", "LIST"
-KINDS = (TEACH, WHERE_AM_I, GO, LIST)
+TEACH, WHERE_AM_I, GO, LIST, RELEARN = "TEACH", "WHERE_AM_I", "GO", "LIST", "RELEARN"
+KINDS = (TEACH, WHERE_AM_I, GO, LIST, RELEARN)
 
 
 @dataclass
@@ -59,6 +63,9 @@ _GO = re.compile(
     r"^(?:take me|guide me|lead me|bring me|walk me|get me|navigate me|"
     r"how do i get|how do i go|how can i get|how can i go|help me get|show me the way)"
     r"\s+(?:back\s+)?(?:to|into)\s+(?P<n>.+)$")
+_RELEARN = re.compile(
+    r"^(?:re ?learn|learn again|teach again|learn|teach)\s+(?P<n>this room|the room|this place|"
+    r"(?:the\s+)?[a-z' ]+?)(?:\s+again)?$")
 _TEACH = re.compile(
     r"^(?:this room is(?: called)?|this room's name is|the name of this room is|"
     r"(?:call|name) this room|remember this room as|save this room as)(?:\s+(?P<n>.+))?$")
@@ -126,6 +133,14 @@ def parse(text, known_rooms=(), known_names=(), cfg=_DEFAULT):
         return Command(LIST)
     if _WHERE_AM_I.match(t):
         return Command(WHERE_AM_I)
+    m = _RELEARN.match(t)
+    if m and (t.startswith(("re", "learn again", "teach again")) or t.endswith(" again")):
+        raw = _clean(m.group("n"))
+        if raw in ("this room", "the room", "this place"):
+            return Command(RELEARN, None, raw)
+        room = room_name(raw, known_rooms, known_names, cfg)
+        if room:
+            return Command(RELEARN, room, raw)
     m = _TEACH.match(t)
     if m:
         heard = _clean(m.group("n"))

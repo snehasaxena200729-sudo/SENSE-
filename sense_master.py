@@ -578,7 +578,8 @@ def answer_voice_query(user_text):
     # Room commands (mapping/): "this room is the kitchen", "where am I?", "take me to the
     # bedroom", "which rooms do you know?". Anything else returns None and goes on below.
     map_reply = home_map.handle(user_text, current_time, known_names=set(known_objects) |
-                                {p.lower() for p in known_people}) if home_map is not None else None
+                                {p.lower() for p in known_people},
+                                heading=cumulative_camera_heading) if home_map is not None else None
     if map_reply:
         speak(map_reply)
         return
@@ -1683,6 +1684,11 @@ while True:
     item_whereabouts.observe(frame_observations, current_time, frame_width, frame_height, camera_is_stable)
     personal_items.end_frame(current_time, camera_is_stable)
     turn_estimator.note_seen(frame_observations)
+    if home_map is not None:   # room views while teaching + which room this is (mapping/, every 10th steady frame)
+        map_msg = home_map.observe(raw_frame, boxes, model.names, cumulative_camera_heading, camera_is_stable,
+                                   current_time, can_speak=not is_listening and not is_speaking())
+        if map_msg:
+            speak(map_msg)
 
     # Persist newly named object identities (rare) and free old track buffers
     for eid, ent in resolver.pop_dirty():
