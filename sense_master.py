@@ -296,6 +296,13 @@ except Exception as e:
     qa = None
     print(f"💬 Interactive questions off ({e})")
 
+try:  # optional home map (mapping/ package): rooms you name by voice. SENSE runs exactly as before without it.
+    import mapping
+    home_map = mapping.create(SESSION_ID)
+except Exception as e:
+    home_map = None
+    print(f"🏠 Home map off ({e})")
+
 def get_spatial_zone_from_x(x_coordinate, frame_width=640):
     third = frame_width / 3.0
     if x_coordinate < third:
@@ -568,6 +575,13 @@ def answer_voice_query(user_text):
         return
     if qa_reply is not None and qa_reply.kind == "rewrite":  # "where is it?" -> "where is the bottle"
         user_text = qa_reply.text
+    # Room commands (mapping/): "this room is the kitchen", "where am I?", "take me to the
+    # bedroom", "which rooms do you know?". Anything else returns None and goes on below.
+    map_reply = home_map.handle(user_text, current_time, known_names=set(known_objects) |
+                                {p.lower() for p in known_people}) if home_map is not None else None
+    if map_reply:
+        speak(map_reply)
+        return
     intent = answers.classify_intent(user_text)   # Roadmap E6 (rule-based, offline)
     print(f"🧭 Intent: {intent}")
 
