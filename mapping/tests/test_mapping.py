@@ -187,6 +187,14 @@ class CommandTests(unittest.TestCase):
     def say(self, text, names=()):
         return self.home.handle(text, self.clock(), known_names=names)
 
+    def teach_no_views(self, name):
+        """Phase 0 behaviour: the room is registered, then teaching is cancelled
+        (no camera frames in these tests)."""
+        start = self.say(f"this room is the {name}")
+        self.assertIn("turn slowly all the way round", start)
+        self.assertIn("Nothing new was saved", self.say("cancel"))
+        return start
+
     def test_empty_state(self):
         self.assertIn("No rooms are registered yet", self.say("Which rooms do you know?"))
         self.assertIn("I don't know which room you are in", self.say("Where am I?"))
@@ -194,19 +202,19 @@ class CommandTests(unittest.TestCase):
         self.assertIn("I don't know the bedroom yet", self.say("Take me to the bedroom."))
 
     def test_teach_then_ask(self):
-        self.assertIn("saved the kitchen", self.say("This room is the kitchen."))
+        self.teach_no_views("kitchen")
         self.clock.t += 120
         self.assertEqual(self.say("Where am I?"),
                          "The last room you told me was the kitchen, 2 minutes ago. "
                          "I can't recognise rooms by sight yet.")
         self.assertIn("already in the kitchen", self.say("take me to the kitchen"))
-        self.say("this room is the bedroom")
+        self.teach_no_views("bedroom")
         self.assertIn("can't guide you between rooms yet", self.say("take me to the kitchen"))
         self.assertEqual(self.say("which rooms do you know"),
                          "I know 2 rooms: the kitchen and the bedroom.")
 
     def test_where_am_i_expires_and_is_per_run(self):
-        self.say("this room is the kitchen")
+        self.teach_no_views("kitchen")
         self.clock.t += 31 * 60
         self.assertTrue(self.say("where am i").startswith("I don't know which room"))
         other_run = mapping.HomeMap(self.home.rooms.conn, "run2", clock=self.clock)
